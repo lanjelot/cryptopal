@@ -326,31 +326,55 @@ class PaddingOracle:
       except Empty:
         sleep(.1)
 
+  def encrypt(self, plaintext, block_size, iv=None):
+    plaintext = pkcs7pad(plaintext, block_size)
+
+    if iv is None:
+      iv = '\x00' * block_size
+
+    encrypted = iv
+    blocks = chunk(plaintext, block_size)
+    self.resultq = Queue()
+
+    block = iv
+    for prev in blocks[::-1]:
+
+      t = Thread(target=self.bust, args=(block, block_size))
+      t.daemon = True
+      t.start()
+
+      _, inter = self.pop_result()
+      block = xor(inter, prev)
+
+      encrypted = block + encrypted
+
+    return encrypted
+
   def decrypt(self, ciphertext, block_size, verbose=False):
 
     decrypted = {}
     blocks = chunk(ciphertext, block_size)
     self.resultq = Queue()
 
-    for iv, block in pairwise(blocks):
-      t = Thread(target=self.bust, args=(block, block_size, iv))
+    for block in blocks[1:]:
+      t = Thread(target=self.bust, args=(block, block_size))
       t.daemon = True
       t.start()
 
     while True:
-      block, data = self.pop_result()
+      block, inter = self.pop_result()
       idx = blocks.index(block)
-      decrypted[idx] = data
+      decrypted[idx] = xor(inter, blocks[idx - 1])
 
-      #if verbose:
-      #  print 'Decrypted block %d: %r' % (idx, data)
+      if verbose:
+        print 'Decrypted block %d: %r' % (idx, data)
 
       if len(decrypted) == len(blocks) - 1:
         break
 
     return ''.join(s for _, s in sorted(decrypted.iteritems()))
 
-  def bust(self, block, block_size, prev_block):
+  def bust(self, block, block_size):
 
     intermediate_bytes = bytearray(block_size)
     test_bytes = bytearray(block_size) + block
@@ -382,15 +406,12 @@ class PaddingOracle:
           intermediate_bytes[byte_num] = decrypted_byte
 
           for k in xrange(byte_num, block_size):
-
             # XOR the current test byte with the padding value
             # for this round to recover the decrypted byte
-
             test_bytes[k] ^= current_pad_byte
 
             # XOR it again with the padding byte for the
             # next round
-
             test_bytes[k] ^= next_pad_byte
 
           break
@@ -398,14 +419,16 @@ class PaddingOracle:
         else:
           retries += 1
           break
+
       else:
         break
+
     else:
       raise RuntimeError('Could not decrypt byte %d in %r within '
                          'maximum allotted retries (%d)' % (
                          byte_num, block, self.max_retries))
 
-    self.resultq.put((block, xor(str(intermediate_bytes), prev_block)))
+    self.resultq.put((block, str(intermediate_bytes)))
 
 def encrypt_ecb(msg, key):
   return AES.new(key, mode=AES.MODE_ECB).encrypt(msg)
@@ -416,7 +439,7 @@ def decrypt_ecb(msg, key):
 def encrypt_cbc(msg, key, iv):
   ct = iv
   result = ''
-  for pt in chunk(msg, len(key)):
+  for pt in chunk(msg, AES.block_size):
     ct = encrypt_ecb(xor(ct, pt), key)
     result += ct
 
@@ -426,7 +449,7 @@ def decrypt_cbc(msg, key, iv=None):
   if iv:
     msg = iv + msg
   result = ''
-  for prev_ct, ct in pairwise(chunk(msg, len(key))):
+  for prev_ct, ct in pairwise(chunk(msg, AES.block_size)):
     result += xor(prev_ct, decrypt_ecb(ct, key))
 
   return result
@@ -655,14 +678,16 @@ class Tests(unittest.TestCase):
 
       self.assertTrue(xor(ciphertext, found_key) == plaintext)
 
-  def test_encrypt_decrypt_cbc(self):
-    for bs in block_sizes:
-      for msg_size in xrange(bs * 3):
-        msg = random_bytes(msg_size)
-        key = random_bytes(bs)
-        iv = random_bytes(bs)
 
-        enc = encrypt_cbc(pkcs7pad(msg, bs), key, iv)
+  # TODO add tests with other algorithms (e.g. DES)
+
+  def test_encrypt_decrypt_cbc(self):
+    for key_size in AES.key_size:
+      for msg_size in xrange(AES.block_size * 3):
+        msg = random_bytes(msg_size)
+        key = random_bytes(key_size)
+        iv = random_bytes(AES.block_size)
+        enc = encrypt_cbc(pkcs7pad(msg, AES.block_size), key, iv)
         dec = pkcs7unpad(decrypt_cbc(enc, key))
 
         self.assertTrue(dec == msg)
@@ -670,48 +695,47 @@ class Tests(unittest.TestCase):
   def test_find_blocksize(self):
 
     def encryption_oracle(s):
-      return encrypt_ecb(pkcs7pad(s, bs), key)
+      return encrypt_ecb(pkcs7pad(s, AES.block_size), key)
 
-    for bs in block_sizes:
+    for key_size in AES.key_size:
       for _ in xrange(100):
-        key = random_bytes(bs)
+        key = random_bytes(key_size)
 
-        self.assertTrue(bs == find_blocksize(encryption_oracle))
-
+        self.assertTrue(AES.block_size == find_blocksize(encryption_oracle))
 
   def test_detect_ecb(self):
 
-    for bs in block_sizes:
+    for key_size in AES.key_size:
       for n in xrange(100):
-        key = random_bytes(bs)
-        blocks = ['A' * bs] * 2
+        key = random_bytes(key_size)
+        blocks = ['A' * AES.block_size] * 2
         for _ in xrange(n):
-          blocks.append(random_bytes(bs))
+          blocks.append(random_bytes(AES.block_size))
         shuffle(blocks)
         data = ''.join(blocks)
 
         if randint(0, 1) == 0:
-          ct = encrypt_cbc(pkcs7pad(data, bs), key, random_bytes(bs))
-          #print 'CBC ct: %s' % map(lambda s: s.encode('hex'), chunk(ct, bs))
+          ct = encrypt_cbc(pkcs7pad(data, AES.block_size), key, random_bytes(AES.block_size))
+          #print 'CBC ct: %s' % map(lambda s: s.encode('hex'), chunk(ct, AES.block_size))
           self.assertFalse(detect_ecb(ct))
         else:
-          ct = encrypt_ecb(pkcs7pad(data, bs), key)
-          #print 'ECB ct: %s' % map(lambda s: s.encode('hex'), chunk(ct, bs))
+          ct = encrypt_ecb(pkcs7pad(data, AES.block_size), key)
+          #print 'ECB ct: %s' % map(lambda s: s.encode('hex'), chunk(ct, AES.block_size))
           self.assertTrue(detect_ecb(ct))
 
   def test_sizeof_pfxsfx(self):
 
     def encryption_oracle(s):
       data = '%s%s%s' % (pfx, s, sfx)
-      return encrypt_ecb(pkcs7pad(data, bs), key)
+      return encrypt_ecb(pkcs7pad(data, AES.block_size), key)
 
-    for bs in block_sizes:
-      for max_size in xrange(0, bs * 3):
-        key = random_bytes(bs)
+    for key_size in AES.key_size:
+      for max_size in xrange(0, AES.block_size * 3):
+        key = random_bytes(key_size)
         pfx = random_bytes(randint(0, max_size))
         sfx = random_bytes(randint(0, max_size))
 
-        pfx_size, sfx_size, _ = sizeof_pfxsfx(encryption_oracle, bs)
+        pfx_size, sfx_size, _ = sizeof_pfxsfx(encryption_oracle, AES.block_size)
 
         self.assertTrue((pfx_size, sfx_size) == (len(pfx), len(sfx)))
 
@@ -719,11 +743,11 @@ class Tests(unittest.TestCase):
 
     def encryption_oracle(s):
       data = '%s%s%s' % (pfx, s, sfx)
-      return encrypt_ecb(pkcs7pad(data, bs), key)
+      return encrypt_ecb(pkcs7pad(data, AES.block_size), key)
 
-    for bs in block_sizes:
-      for max_size in xrange(0, bs * 3):
-        key = random_bytes(bs)
+    for key_size in AES.key_size:
+      for max_size in xrange(0, AES.block_size * 3):
+        key = random_bytes(key_size)
         pfx = random_bytes(randint(0, max_size))
         sfx = random_bytes(randint(0, max_size))
 
@@ -733,8 +757,9 @@ class Tests(unittest.TestCase):
 
   def test_pkcs7unpad(self):
 
-    for bs in block_sizes:
+    for bs in xrange(100):
       for msg_size in xrange(bs * 3):
+
         msg = random_bytes(msg_size)
         padded = pkcs7pad(msg, bs)
         unpadded = pkcs7unpad(padded)
@@ -747,12 +772,34 @@ class Tests(unittest.TestCase):
 
   def test_encrypt_decrypt_ctr(self):
 
-    for bs in block_sizes:
+    for key_size in AES.key_size:
       for msg_size in xrange(1, 1000):
-        key = random_bytes(bs)
+        key = random_bytes(key_size)
         msg = random_bytes(msg_size)
 
       self.assertTrue(CTRCipher(key, 0).decrypt(CTRCipher(key, 0).encrypt(msg)) == msg)
+
+  def test_padding_oracle_encrypt(self):
+    key='YELLOW SUBMARINE'
+
+    def oracle_decrypt(data):
+      try:
+        _ = pkcs7unpad(decrypt_cbc(data, key))
+      except PaddingException:
+        return 'error'
+
+    class PadBuster(PaddingOracle):
+      def oracle(self, data):
+        if oracle_decrypt(data) == 'error':
+          raise PaddingException
+
+    padbuster = PadBuster()
+
+    for i in xrange(10):
+      msg = random_bytes(i * AES.block_size + randint(1, AES.block_size))
+      forged = padbuster.encrypt(msg, AES.block_size)
+
+      self.assertTrue(pkcs7unpad(decrypt_cbc(forged, key)) == msg)
 
   def test_padding_oracle_decrypt(self):
     key='YELLOW SUBMARINE'
@@ -770,16 +817,14 @@ class Tests(unittest.TestCase):
 
     padbuster = PadBuster()
 
-    for bs in [16]: #block_sizes: # im getting some failed tests with bs=32, probably because we start back at last_ok
-      for msg_size in xrange(1, 1000):
-        msg = random_bytes(msg_size)
-        ct = encrypt_cbc(pkcs7pad(msg, bs), key, random_bytes(bs))
-
-        self.assertTrue(pkcs7unpad(padbuster.decrypt(ct, bs)) == msg)
+    for i in xrange(10):
+      msg = random_bytes(i * AES.block_size + randint(1, AES.block_size))
+      ct = encrypt_cbc(pkcs7pad(msg, AES.block_size), key, random_bytes(AES.block_size))
+      pt = padbuster.decrypt(ct, AES.block_size)
+      self.assertTrue(pkcs7unpad(pt) == msg)
 
 if __name__ == '__main__':
   plaintext = '''In 2071, roughly sixty years after an accident with a hyperspace gateway made the Earth uninhabitable, humanity has colonized most of the rocky planets and moons of the Solar System.\n Amid a rising crime rate, the Inter Solar System Police (ISSP) set up a legalized contract system, in which registered bounty hunters (also referred to as "Cowboys") chase criminals and bring them in alive in return for a reward.\n The series protagonists are bounty hunters working from the spaceship Bebop.\n The original crew are Spike Spiegel, an exiled former hitman of the criminal Red Dragon Syndicate, and his partner Jet Black, a former ISSP officer.\n They are later joined by Faye Valentine, an amnesiac con artist; Edward Wong, an eccentric girl skilled in hacking; and Ein, a genetically-engineered Pembroke Welsh Corgi with human-like intelligence.\n Over the course of the series, the team get involved in disastrous mishaps leaving them out of pocket, while often confronting faces and events from their past: these include Jet's reasons for leaving the ISSP, and Faye's past as a young woman from Earth injured in an accident and cryogenically frozen to save her life'''
-  block_sizes = [16, 32]
   unittest.main()
 
 # vim: ts=2 sw=2 sts=2 et fdm=marker bg=dark
