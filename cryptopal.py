@@ -1,5 +1,3 @@
-#!/bin/python
-
 from collections import Counter, defaultdict
 from Crypto.Cipher import AES
 from Crypto.Util.number import long_to_bytes, bytes_to_long
@@ -7,12 +5,37 @@ from random import randint, shuffle
 import itertools
 import hashlib
 from time import time, sleep
+from threading import Thread
+from Queue import Queue, Empty
+
+def base36encode(number):
+    if not isinstance(number, (int, long)):
+        raise TypeError('number must be an integer')
+    if number < 0:
+        raise ValueError('number must be positive')
+
+    alphabet, base36 = ['0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ', '']
+
+    while number:
+        number, i = divmod(number, 36)
+        base36 = alphabet[i] + base36
+
+    return base36 or alphabet[0]
+
+def base36decode(number):
+    return int(number, 36)
 
 def random_bytes(n):
   return ''.join(chr(randint(0, 255)) for _ in range(n))
 
+def random_printables(n):
+  return ''.join(chr(randint(32, 126)) for _ in range(n))
+
+def random_chars(n, charset='ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789 '):
+  return ''.join(charset[randint(0, len(charset)-1)] for _ in range(n))
+
 def xor(text, key):
-  return ''.join([chr(ord(c1) ^ ord(c2)) for c1, c2 in zip(text, itertools.cycle(key))])
+  return ''.join([chr(ord(c1) ^ ord(c2)) for c1, c2 in itertools.izip(text, itertools.cycle(key))])
 
 def chunk(s, bs):
   return [s[i:i + bs] for i in range(0, len(s), bs)]
@@ -23,6 +46,11 @@ def chunk_pp(s, bs):
 def ichunk(s, bs):
   for i in xrange(0, len(s), bs):
     yield s[i:i + bs]
+
+def _long_to_bytes(n):
+  s = '%x' % n
+  s = s if len(s) % 2 == 0 else '0' + s
+  return s.decode('hex')
 
 def pkcs7pad(s, bs):
   pad = bs - (len(s) % bs)
@@ -117,10 +145,33 @@ def find_xor_key(ciphertext, keysize):
 
   return key
 
-def flip(ciphertext, oracle):
+def byteflip(ciphertext, oracle):
+  '''flip only one bit in a byte'''
+
   for i in range(len(ciphertext)):
-    payload = ciphertext[:i] + chr(ord(ciphertext[i]) + 1) + ciphertext[i + 1:]
+    payload = ciphertext[:i] + chr((ord(ciphertext[i]) + 1) % 256) + ciphertext[i + 1:]
     yield i, oracle(payload)
+
+def bitflip(ciphertext, oracle):
+  '''flip every bit in a byte'''
+
+  for i in range(len(ciphertext)):
+    for n in range(7, 0, -1):
+      payload = ciphertext[:i] + chr(ord(ciphertext[i]) ^ (1 << n)) + ciphertext[i + 1:]
+      yield i, oracle(payload)
+
+def bitflipall(ciphertext, oracle):
+  '''test all values in a byte
+  ctext: 01001001
+  flips: 00000000
+         00000001
+         00000010
+         11111111 (255)
+  '''
+  for i in range(len(ciphertext)):
+    for n in range(256):
+      payload = ciphertext[:i] + chr(n) + ciphertext[i + 1:]
+      yield i, oracle(payload)
 
 def oracle(ct):
   url = 'http:// /%s' % ct
@@ -187,7 +238,7 @@ def sizeof_pfxsfx(encryption_oracle, bs):
 
   candidates = []
   for c in 'ABC':
-    for n in range(bs * 3):
+    for n in range(bs, bs * 3):
       blocks = chunk(encryption_oracle(c * n), bs)
       i = indexof_pair(blocks)
       if i >= 0:
@@ -222,7 +273,7 @@ def sizeof_pfxsfx(encryption_oracle, bs):
 
   return prefix_size, suffix_size, c
 
-def decrypt_suffix(encryption_oracle, bs=None, prefix_size=None, suffix_size=None, char=None, verbose=False):
+def decrypt_suffix(encryption_oracle, bs=None, prefix_size=None, suffix_size=None, char=None, verbose=False, charset=None):
 
   if bs is None:
     bs = find_blocksize(encryption_oracle)
@@ -232,6 +283,9 @@ def decrypt_suffix(encryption_oracle, bs=None, prefix_size=None, suffix_size=Non
 
   if prefix_size is None or suffix_size is None or char is None:
     prefix_size, suffix_size, char = sizeof_pfxsfx(encryption_oracle, bs)
+
+  if charset is None:
+    charset = map(chr, range(256))
 
   if verbose:
     print '[+] prefix_size: %d, suffix_size: %d, char: %s' % (prefix_size, suffix_size, char)
@@ -243,7 +297,7 @@ def decrypt_suffix(encryption_oracle, bs=None, prefix_size=None, suffix_size=Non
     data = char * n
     ref_block = chunk(encryption_oracle(data), bs)[ref_index]
 
-    for c in map(chr, range(256)):
+    for c in charset:
       msg = '%s%s%s' % (data, ''.join(decrypted), c)
 
       if ref_block == chunk(encryption_oracle(msg), bs)[ref_index]:
@@ -255,6 +309,103 @@ def decrypt_suffix(encryption_oracle, bs=None, prefix_size=None, suffix_size=Non
       decrypted += '?'
 
   return decrypted[:suffix_size]
+
+
+class PaddingOracle:
+  '''Added multithreading to https://github.com/mwielgoszewski/python-paddingoracle'''
+
+  def __init__(self, max_retries=5):
+    self.max_retries = max_retries
+
+  def pop_result(self):
+    '''Ctrl-C friendly :)'''
+
+    while True:
+      try:
+        return self.resultq.get_nowait()
+      except Empty:
+        sleep(.1)
+
+  def decrypt(self, ciphertext, block_size, verbose=False):
+
+    decrypted = {}
+    blocks = chunk(ciphertext, block_size)
+    self.resultq = Queue()
+
+    for iv, block in pairwise(blocks):
+      t = Thread(target=self.bust, args=(block, block_size, iv))
+      t.daemon = True
+      t.start()
+
+    while True:
+      block, data = self.pop_result()
+      idx = blocks.index(block)
+      decrypted[idx] = data
+
+      #if verbose:
+      #  print 'Decrypted block %d: %r' % (idx, data)
+
+      if len(decrypted) == len(blocks) - 1:
+        break
+
+    return ''.join(s for _, s in sorted(decrypted.iteritems()))
+
+  def bust(self, block, block_size, prev_block):
+
+    intermediate_bytes = bytearray(block_size)
+    test_bytes = bytearray(block_size) + block
+
+    retries = 0
+    last_ok = 0
+    while retries < self.max_retries:
+
+      for byte_num in reversed(range(block_size)):
+
+        r = 256
+        if byte_num == block_size - 1 and last_ok > 0:
+          r = last_ok
+
+        for i in reversed(range(r)):
+
+          test_bytes[byte_num] = i
+
+          try:
+            self.oracle(str(test_bytes))
+
+          except PaddingException:
+            continue
+
+          current_pad_byte = block_size - byte_num
+          next_pad_byte = block_size - byte_num + 1
+          decrypted_byte = test_bytes[byte_num] ^ current_pad_byte
+
+          intermediate_bytes[byte_num] = decrypted_byte
+
+          for k in xrange(byte_num, block_size):
+
+            # XOR the current test byte with the padding value
+            # for this round to recover the decrypted byte
+
+            test_bytes[k] ^= current_pad_byte
+
+            # XOR it again with the padding byte for the
+            # next round
+
+            test_bytes[k] ^= next_pad_byte
+
+          break
+
+        else:
+          retries += 1
+          break
+      else:
+        break
+    else:
+      raise RuntimeError('Could not decrypt byte %d in %r within '
+                         'maximum allotted retries (%d)' % (
+                         byte_num, block, self.max_retries))
+
+    self.resultq.put((block, xor(str(intermediate_bytes), prev_block)))
 
 def encrypt_ecb(msg, key):
   return AES.new(key, mode=AES.MODE_ECB).encrypt(msg)
@@ -456,7 +607,7 @@ class Tests(unittest.TestCase):
   def test_sha1_hash(self):
     for size in range(1000):
       data = random_bytes(size)
-      
+
       sha = SHA1()
       sha.update(data)
 
@@ -465,7 +616,7 @@ class Tests(unittest.TestCase):
   def test_sha1_extend(self):
     def make_mac(msg):
       return hashlib.sha1(key + msg).hexdigest()
-    
+
     def check_mac(msg, mac):
       return mac and mac == make_mac(msg)
 
@@ -490,7 +641,7 @@ class Tests(unittest.TestCase):
     for keysize in range(1, 40):
       key = random_bytes(keysize)
       ciphertext = xor(plaintext * 4, key)
-      
+
       found_keysize = find_xor_keysize(ciphertext)[0][0]
       self.assertTrue(found_keysize % keysize == 0)
 
@@ -503,14 +654,14 @@ class Tests(unittest.TestCase):
       found_key = find_xor_key(ciphertext, found_keysize)
 
       self.assertTrue(xor(ciphertext, found_key) == plaintext)
-      
+
   def test_encrypt_decrypt_cbc(self):
     for bs in block_sizes:
       for msg_size in xrange(bs * 3):
         msg = random_bytes(msg_size)
         key = random_bytes(bs)
         iv = random_bytes(bs)
-        
+
         enc = encrypt_cbc(pkcs7pad(msg, bs), key, iv)
         dec = pkcs7unpad(decrypt_cbc(enc, key))
 
@@ -526,7 +677,7 @@ class Tests(unittest.TestCase):
         key = random_bytes(bs)
 
         self.assertTrue(bs == find_blocksize(encryption_oracle))
-    
+
 
   def test_detect_ecb(self):
 
@@ -602,6 +753,29 @@ class Tests(unittest.TestCase):
         msg = random_bytes(msg_size)
 
       self.assertTrue(CTRCipher(key, 0).decrypt(CTRCipher(key, 0).encrypt(msg)) == msg)
+
+  def test_padding_oracle_decrypt(self):
+    key='YELLOW SUBMARINE'
+
+    def oracle_decrypt(data):
+      try:
+        _ = pkcs7unpad(decrypt_cbc(data, key))
+      except PaddingException:
+        return 'error'
+
+    class PadBuster(PaddingOracle):
+      def oracle(self, data):
+        if oracle_decrypt(data) == 'error':
+          raise PaddingException
+
+    padbuster = PadBuster()
+
+    for bs in [16]: #block_sizes: # im getting some failed tests with bs=32, probably because we start back at last_ok
+      for msg_size in xrange(1, 1000):
+        msg = random_bytes(msg_size)
+        ct = encrypt_cbc(pkcs7pad(msg, bs), key, random_bytes(bs))
+
+        self.assertTrue(pkcs7unpad(padbuster.decrypt(ct, bs)) == msg)
 
 if __name__ == '__main__':
   plaintext = '''In 2071, roughly sixty years after an accident with a hyperspace gateway made the Earth uninhabitable, humanity has colonized most of the rocky planets and moons of the Solar System.\n Amid a rising crime rate, the Inter Solar System Police (ISSP) set up a legalized contract system, in which registered bounty hunters (also referred to as "Cowboys") chase criminals and bring them in alive in return for a reward.\n The series protagonists are bounty hunters working from the spaceship Bebop.\n The original crew are Spike Spiegel, an exiled former hitman of the criminal Red Dragon Syndicate, and his partner Jet Black, a former ISSP officer.\n They are later joined by Faye Valentine, an amnesiac con artist; Edward Wong, an eccentric girl skilled in hacking; and Ein, a genetically-engineered Pembroke Welsh Corgi with human-like intelligence.\n Over the course of the series, the team get involved in disastrous mishaps leaving them out of pocket, while often confronting faces and events from their past: these include Jet's reasons for leaving the ISSP, and Faye's past as a young woman from Earth injured in an accident and cryogenically frozen to save her life'''
