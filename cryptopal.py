@@ -7,6 +7,7 @@ import hashlib
 from time import time, sleep
 from threading import Thread
 from Queue import Queue, Empty
+import logging
 
 def base36encode(number):
     if not isinstance(number, (int, long)):
@@ -173,11 +174,6 @@ def bitflipall(ciphertext, oracle):
       payload = ciphertext[:i] + chr(n) + ciphertext[i + 1:]
       yield i, oracle(payload)
 
-def oracle(ct):
-  url = 'http:// /%s' % ct
-  r = requests.get(url)
-  return r
-
 def detect_ecb(ciphertext):
   
   for bs in [16, 32, 8, 12, 24]:
@@ -327,6 +323,8 @@ class PaddingOracle:
         sleep(.1)
 
   def encrypt(self, plaintext, block_size, iv=None):
+    '''encryption cannot be multithreaded'''
+
     plaintext = pkcs7pad(plaintext, block_size)
 
     if iv is None:
@@ -339,9 +337,7 @@ class PaddingOracle:
     block = iv
     for prev in blocks[::-1]:
 
-      t = Thread(target=self.bust, args=(block, block_size))
-      t.daemon = True
-      t.start()
+      self.bust(block, block_size)
 
       _, inter = self.pop_result()
       block = xor(inter, prev)
@@ -350,7 +346,8 @@ class PaddingOracle:
 
     return encrypted
 
-  def decrypt(self, ciphertext, block_size, verbose=False):
+  def decrypt(self, ciphertext, block_size):
+    '''decrypt each block in a thread'''
 
     decrypted = {}
     blocks = chunk(ciphertext, block_size)
@@ -361,20 +358,25 @@ class PaddingOracle:
       t.daemon = True
       t.start()
 
-    while True:
-      block, inter = self.pop_result()
-      idx = blocks.index(block)
-      decrypted[idx] = xor(inter, blocks[idx - 1])
+    try:
+      while True:
+        block, inter = self.pop_result()
+        idx = blocks.index(block)
+        decrypted[idx] = xor(inter, blocks[idx - 1])
 
-      if verbose:
-        print 'Decrypted block %d: %r' % (idx, data)
+        logging.info('Decrypted block %d: %r' % (idx, decrypted[idx]))
 
-      if len(decrypted) == len(blocks) - 1:
-        break
+        if len(decrypted) == len(blocks) - 1:
+          break
+
+    except KeyboardInterrupt:
+      pass
 
     return ''.join(s for _, s in sorted(decrypted.iteritems()))
 
   def bust(self, block, block_size):
+
+    logging.debug('Processing block %r', block)
 
     intermediate_bytes = bytearray(block_size)
     test_bytes = bytearray(block_size) + block
@@ -383,18 +385,21 @@ class PaddingOracle:
     last_ok = 0
     while retries < self.max_retries:
 
-      for byte_num in reversed(range(block_size)):
+      for byte_num in reversed(xrange(block_size)):
 
         r = 256
         if byte_num == block_size - 1 and last_ok > 0:
           r = last_ok
 
-        for i in reversed(range(r)):
+        for i in reversed(xrange(r)):
 
           test_bytes[byte_num] = i
 
           try:
             self.oracle(str(test_bytes))
+
+            if byte_num == block_size - 1:
+                last_ok = i
 
           except PaddingException:
             continue
@@ -417,7 +422,9 @@ class PaddingOracle:
           break
 
         else:
+          logging.debug("byte %d not found, restarting" % byte_num)
           retries += 1
+
           break
 
       else:
