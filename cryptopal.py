@@ -7,6 +7,7 @@ import hashlib
 from time import time, sleep
 from threading import Thread
 from Queue import Queue, Empty
+import struct
 import logging
 
 def base36encode(number):
@@ -88,6 +89,9 @@ def score_english(msg):
 
   return score, stats
 
+def count_printable(msg):
+  return len([c for c in msg if ord(c) >= 0x20 and ord(c) < 0x7f])
+
 def crack_single_char_xor(ciphertext):
   best_score, best_char = 0, '\x00'
 
@@ -104,7 +108,6 @@ def hamming(str1, str2):
   return sum(bin(ord(c1) ^ ord(c2)).count('1') for c1, c2 in zip(str1, str2))
 
 def find_xor_keysize(ciphertext):
-
   distances = {}
 
   for keysize in range(2, 40):
@@ -125,8 +128,8 @@ def find_xor_keysize(ciphertext):
   return sorted(distances.items(), key=lambda x: x[1])
 
 def find_xor_key(ciphertext, keysize):
-
   transposed = []
+
   for i in range(0, keysize):
 
     chars = ''
@@ -147,14 +150,14 @@ def find_xor_key(ciphertext, keysize):
   return key
 
 def byteflip(ciphertext, oracle):
-  '''flip only one bit in a byte'''
+  '''Flip only one bit in a byte'''
 
   for i in range(len(ciphertext)):
     payload = ciphertext[:i] + chr((ord(ciphertext[i]) + 1) % 256) + ciphertext[i + 1:]
     yield i, oracle(payload)
 
 def bitflip(ciphertext, oracle):
-  '''flip every bit in a byte'''
+  '''Flip every bit in a byte'''
 
   for i in range(len(ciphertext)):
     for n in range(7, 0, -1):
@@ -162,7 +165,7 @@ def bitflip(ciphertext, oracle):
       yield i, oracle(payload)
 
 def bitflipall(ciphertext, oracle):
-  '''test all values in a byte
+  '''Test all values in a byte
   ctext: 01001001
   flips: 00000000
          00000001
@@ -175,7 +178,6 @@ def bitflipall(ciphertext, oracle):
       yield i, oracle(payload)
 
 def detect_ecb(ciphertext):
-  
   for bs in [16, 32, 8, 12, 24]:
     blocks = chunk(ciphertext, bs)
     stats = Counter(blocks)
@@ -187,9 +189,8 @@ def detect_ecb(ciphertext):
   return stats
 
 def detect_ecb2(ciphertext):
-
+  '''using defaultdict instead of Counter'''
   for bs in [16, 32, 8, 12, 24]:
-
     blocks = chunk(ciphertext, bs)
     stats = defaultdict(lambda: 1)
 
@@ -217,7 +218,6 @@ def find_blocksize(encryption_oracle):
   return size - prev_size
 
 def sizeof_pfxsfx(encryption_oracle, bs):
-
 #  skip = []
 #  blocks = chunk(encryption_oracle('', bs))
 #  for i in range(1, len(blocks)):
@@ -270,7 +270,6 @@ def sizeof_pfxsfx(encryption_oracle, bs):
   return prefix_size, suffix_size, c
 
 def decrypt_suffix(encryption_oracle, bs=None, prefix_size=None, suffix_size=None, char=None, verbose=False, charset=None):
-
   if bs is None:
     bs = find_blocksize(encryption_oracle)
 
@@ -306,7 +305,6 @@ def decrypt_suffix(encryption_oracle, bs=None, prefix_size=None, suffix_size=Non
 
   return decrypted[:suffix_size]
 
-
 class PaddingOracle:
   '''Added multithreading to https://github.com/mwielgoszewski/python-paddingoracle'''
 
@@ -323,7 +321,7 @@ class PaddingOracle:
         sleep(.1)
 
   def encrypt(self, plaintext, block_size, iv=None):
-    '''encryption cannot be multithreaded'''
+    '''Encryption cannot be multithreaded'''
 
     plaintext = pkcs7pad(plaintext, block_size)
 
@@ -347,7 +345,7 @@ class PaddingOracle:
     return encrypted
 
   def decrypt(self, ciphertext, block_size):
-    '''decrypt each block in a thread'''
+    '''Decrypt each block in a thread'''
 
     decrypted = {}
     blocks = chunk(ciphertext, block_size)
@@ -375,7 +373,6 @@ class PaddingOracle:
     return ''.join(s for _, s in sorted(decrypted.iteritems()))
 
   def bust(self, block, block_size):
-
     logging.debug('Processing block %r', block)
 
     intermediate_bytes = bytearray(block_size)
@@ -411,12 +408,7 @@ class PaddingOracle:
           intermediate_bytes[byte_num] = decrypted_byte
 
           for k in xrange(byte_num, block_size):
-            # XOR the current test byte with the padding value
-            # for this round to recover the decrypted byte
             test_bytes[k] ^= current_pad_byte
-
-            # XOR it again with the padding byte for the
-            # next round
             test_bytes[k] ^= next_pad_byte
 
           break
@@ -486,9 +478,126 @@ class CTRCipher:
   def decrypt(self, msg):
     return self.encrypt(msg) 
 
+# MT19937
+class MT19937:
+  w, n, m, r = 32, 624, 397, 31
+  a = 0x9908B0DF
+  u = 11
+  s, b = 7, 0x9d2c5680
+  t, c = 15, 0xefc60000
+  l = 18
+  f = 1812433253
+
+  def __init__(self, seed=None):
+    self.index = MT19937.n + 1
+    self.MT = [0] * MT19937.n
+
+    lower_mask = (1 << MT19937.r) - 1
+    upper_mask = (1 << MT19937.r)
+
+    wbit_mask = (1 << MT19937.w) - 1  # lowest w bits mask
+
+    if seed is not None:
+      self.seed_mt(seed)
+
+  def seed_mt(self, seed):
+    self.index = MT19937.n
+    self.MT[0] = seed
+    for i in xrange(1, MT19937.n):
+      self.MT[i] = to_int32(
+        MT19937.f * (self.MT[i - 1] ^ (self.MT[i - 1] >> (MT19937.w - 2))) + i)
+
+  def extract_number(self):
+    if self.index >= MT19937.n:
+      if self.index > MT19937.n:
+        raise Exception('Generator was never seeded, index: %d' % self.index)
+
+      self.twist()
+
+    y = self.MT[self.index]
+    y = y ^ y >> MT19937.u
+    y = y ^ y << MT19937.s & MT19937.b
+    y = y ^ y << MT19937.t & MT19937.c
+    y = y ^ y >> MT19937.l
+
+    self.index = self.index + 1
+
+    return to_int32(y)
+
+  def twist(self):
+    for i in xrange(MT19937.n):
+      y = to_int32((self.MT[i] & 0x80000000) +
+                 (self.MT[(i + 1) % MT19937.n] & 0x7fffffff))
+
+      self.MT[i] = self.MT[(i + MT19937.m) % MT19937.n] ^ y >> 1
+
+      if y % 2 != 0:
+        self.MT[i] = self.MT[i] ^ MT19937.b
+
+    self.index = 0
+
+  @staticmethod
+  def untemper(y):
+    def undo_right_shift_xor(y, s):
+      z = 0
+      for i in range(32):
+        z = set_MSB(z, i, get_MSB(y, i) ^ get_MSB(z, i - s))
+      return z
+
+    def undo_left_shift_xor_and(y, s, k):
+      z = 0
+      for i in range(32):
+       z = set_LSB(z, i, get_LSB(y, i) ^ (get_LSB(z, i - s) & get_LSB(k, i)))
+      return z
+
+    '''Invert the temper transform'''
+    y = undo_right_shift_xor(y, MT19937.l)
+    y = undo_left_shift_xor_and(y, MT19937.t, MT19937.c)
+    y = undo_left_shift_xor_and(y, MT19937.s, MT19937.b)
+    y = undo_right_shift_xor(y, MT19937.u)
+    return y
+
+def to_int32(x):
+  ''' Get the 32 least significant bits'''
+  return int(0xffffffff & x)
+
+def get_MSB(x, n):
+  '''Get the nth most significant bit'''
+  if n < 0:
+    return 0
+  return (x >> (31 - n)) & 1
+
+def set_MSB(x, n, b):
+  '''Set the nth most significant bit'''
+  return x | (b << (31 - n))
+
+def get_LSB(x, n):
+  '''Get the nth least significant bit'''
+  if n < 0:
+    return 0
+  return (x >> n) & 1
+
+def set_LSB(x, n, b):
+  '''Set the nth least significant bit'''
+  return x | (b << n)
+
+def mt_encryptdecrypt(msg, key):
+  mt = MT19937(key)
+
+  if len(msg) == 0:
+    return ''
+
+  keystream = ''
+  while len(keystream) < len(msg):
+    keystream += struct.pack('<I', (mt.extract_number()))
+
+  if len(keystream) > len(msg):
+    keystream = keystream[:len(msg)]
+
+  return xor(msg, keystream)
+
 # hash length extension
 class SHA1:
-
   def __init__(self):
     self._h0, self._h1, self._h2, self._h3, self._h4 = 0x67452301, 0xefcdab89, 0x98badcfe, 0x10325476, 0xc3d2e1f0
 
@@ -497,11 +606,11 @@ class SHA1:
     w = []
 
     for j in xrange(len(chunk) // 32):
-        w.append(int(chunk[j * 32:j * 32 + 32], 2))
+      w.append(int(chunk[j * 32:j * 32 + 32], 2))
 
     for i in xrange(16, 80):
-        w.append(lrot(w[i - 3] ^ w[i - 8] ^ w[i - 14] ^ w[i - 16], 1)
-            & 0xffffffff)
+      w.append(lrot(w[i - 3] ^ w[i - 8] ^ w[i - 14] ^ w[i - 16], 1)
+          & 0xffffffff)
 
     a = self._h0
     b = self._h1
@@ -511,17 +620,17 @@ class SHA1:
 
     for i in xrange(80):
 
-        if i <= i <= 19:
-            f, k = d ^ (b & (c ^ d)), 0x5a827999
-        elif 20 <= i <= 39:
-            f, k = b ^ c ^ d, 0x6ed9eba1
-        elif 40 <= i <= 59:
-            f, k = (b & c) | (d & (b | c)), 0x8f1bbcdc
-        elif 60 <= i <= 79:
-            f, k = b ^ c ^ d, 0xca62c1d6
+      if i <= i <= 19:
+        f, k = d ^ (b & (c ^ d)), 0x5a827999
+      elif 20 <= i <= 39:
+        f, k = b ^ c ^ d, 0x6ed9eba1
+      elif 40 <= i <= 59:
+        f, k = (b & c) | (d & (b | c)), 0x8f1bbcdc
+      elif 60 <= i <= 79:
+        f, k = b ^ c ^ d, 0xca62c1d6
 
-        temp = lrot(a, 5) + f + e + k + w[i] & 0xffffffff
-        a, b, c, d, e = temp, a, lrot(b, 30), c, d
+      temp = lrot(a, 5) + f + e + k + w[i] & 0xffffffff
+      a, b, c, d, e = temp, a, lrot(b, 30), c, d
 
     self._h0 = (self._h0 + a) & 0xffffffff
     self._h1 = (self._h1 + b) & 0xffffffff
@@ -541,7 +650,6 @@ class SHA1:
       self.transform(message[i * 512:i * 512 + 512])
 
   def extend(self, append, original, digest, prefix_len):
-
     length = prefix_len + len(original) + 1
     while not length % 64 == 56:
       length += 1
@@ -711,24 +819,31 @@ class Tests(unittest.TestCase):
         self.assertTrue(AES.block_size == find_blocksize(encryption_oracle))
 
   def test_detect_ecb(self):
+    '''https://cryptopals.com/sets/2/challenges/11'''
 
-    for key_size in AES.key_size:
-      for n in xrange(100):
-        key = random_bytes(key_size)
-        blocks = ['A' * AES.block_size] * 2
-        for _ in xrange(n):
-          blocks.append(random_bytes(AES.block_size))
-        shuffle(blocks)
-        data = ''.join(blocks)
+    def encryption_oracle(s, pfx_size, sfx_size):
+      key = random_bytes(16)
+      pfx = random_bytes(pfx_size)
+      sfx = random_bytes(sfx_size)
 
-        if randint(0, 1) == 0:
-          ct = encrypt_cbc(pkcs7pad(data, AES.block_size), key, random_bytes(AES.block_size))
-          #print 'CBC ct: %s' % map(lambda s: s.encode('hex'), chunk(ct, AES.block_size))
-          self.assertFalse(detect_ecb(ct))
-        else:
-          ct = encrypt_ecb(pkcs7pad(data, AES.block_size), key)
-          #print 'ECB ct: %s' % map(lambda s: s.encode('hex'), chunk(ct, AES.block_size))
-          self.assertTrue(detect_ecb(ct))
+      data = pkcs7pad(pfx + s + sfx, AES.block_size)
+
+      blocks = chunk(data, AES.block_size)
+      shuffle(blocks)
+
+      data = ''.join(blocks)
+
+      if randint(0, 1) == 0:
+        return encrypt_cbc(data, key, random_bytes(AES.block_size)), 'CBC'
+      else:
+        return encrypt_ecb(data, key), 'ECB'
+
+    for pfx_size, sfx_size in itertools.product(range(50), repeat=2):
+      ct, mode = encryption_oracle('A' * AES.block_size * 3, pfx_size, sfx_size)
+
+      stats = detect_ecb(ct)
+      if stats:
+        self.assertTrue(mode == 'ECB')
 
   def test_sizeof_pfxsfx(self):
 
@@ -747,6 +862,7 @@ class Tests(unittest.TestCase):
         self.assertTrue((pfx_size, sfx_size) == (len(pfx), len(sfx)))
 
   def test_decrypt_suffix(self):
+    '''https://cryptopals.com/sets/2/challenges/14'''
 
     def encryption_oracle(s):
       data = '%s%s%s' % (pfx, s, sfx)
@@ -785,6 +901,97 @@ class Tests(unittest.TestCase):
         msg = random_bytes(msg_size)
 
       self.assertTrue(CTRCipher(key, 0).decrypt(CTRCipher(key, 0).encrypt(msg)) == msg)
+
+  def test_mt19937(self):
+    '''https://cryptopals.com/sets/3/challenges/21'''
+    mt1, mt2 = MT19937(), MT19937()
+
+    seed = randint(0, 100)
+
+    mt1.seed_mt(seed)
+    mt2.seed_mt(seed)
+
+    for _ in xrange(10**6):
+      self.assertTrue(mt1.extract_number() == mt2.extract_number())
+
+  def test_mt19937_crack(self):
+    '''https://cryptopals.com/sets/3/challenges/22'''
+    seed1 = randint(40, 1000)
+    first = MT19937(seed1).extract_number()
+
+    for seed2 in xrange(1000, 0, -1):
+      if MT19937(seed2).extract_number() == first:
+        break
+
+    self.assertTrue(seed2 == seed1)
+
+  def test_mt19937_clone(self):
+    '''https://cryptopals.com/sets/3/challenges/23'''
+
+    for _ in xrange(100):
+      mt = MT19937(randint(0, 10**9))
+
+      MT = [0] * 624
+      for i in range(624):
+        MT[i] = MT19937.untemper(mt.extract_number())
+
+      mt2 = MT19937(0)
+      mt2.MT = MT
+
+      for i in range(1000):
+        a = mt.extract_number()
+        b = mt2.extract_number()
+
+        self.assertTrue(a == b)
+
+  def test_mt19937_encryptdecrypt(self):
+    for msg_size in range(1000):
+      msg = random_bytes(msg_size)
+      key = randint(0, 0xffff)
+
+      ct = mt_encryptdecrypt(msg, key)
+      pt = mt_encryptdecrypt(ct, key)
+
+      self.assertTrue(pt == msg)
+
+  def test_mt19937_recover(self):
+    '''https://cryptopals.com/sets/3/challenges/24'''
+
+    # break PRNG stream cipher (recover key (16-bit seed)
+    key = randint(0, 0xffff)
+    prefix = random_bytes(randint(0, 20))
+
+    def encryption_oracle(s):
+      return mt_encryptdecrypt(prefix + s, key)
+
+    pt = 'A' * 14
+    ct = encryption_oracle(pt)
+
+    pfx_size = len(ct) - len(pt)
+
+    for k in range(0x10000):
+      s = mt_encryptdecrypt('A' * len(ct), k)
+
+      if s[pfx_size:] == ct[pfx_size:]:
+        break
+
+    self.assertTrue(k == key)
+
+    # password reset token
+    secret_seed = randint(40, 1000)
+    token = mt_encryptdecrypt('A' * 14, secret_seed)
+
+    best_score = 0
+    best_seed = 0
+
+    for seed in xrange(1000, 0, -1):
+      score = count_printable(mt_encryptdecrypt(token, seed))
+
+      if score > best_score:
+        best_score = score
+        best_seed = seed
+
+    self.assertTrue(best_seed == secret_seed)
 
   def test_padding_oracle_encrypt(self):
     key='YELLOW SUBMARINE'
