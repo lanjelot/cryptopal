@@ -10,6 +10,7 @@ from Queue import Queue, Empty
 import struct
 import logging
 
+# Utils {{{
 def base36encode(number):
     if not isinstance(number, (int, long)):
         raise TypeError('number must be an integer')
@@ -92,6 +93,37 @@ def score_english(msg):
 def count_printable(msg):
   return len([c for c in msg if ord(c) >= 0x20 and ord(c) < 0x7f])
 
+def byteflip(ciphertext, oracle):
+  '''Flip only one bit in a byte'''
+
+  for i in range(len(ciphertext)):
+    payload = ciphertext[:i] + chr((ord(ciphertext[i]) + 1) % 256) + ciphertext[i + 1:]
+    yield i, oracle(payload)
+
+def bitflip(ciphertext, oracle):
+  '''Flip every bit in a byte'''
+
+  for i in range(len(ciphertext)):
+    for n in range(7, 0, -1):
+      payload = ciphertext[:i] + chr(ord(ciphertext[i]) ^ (1 << n)) + ciphertext[i + 1:]
+      yield i, oracle(payload)
+
+def bitflipall(ciphertext, oracle):
+  '''Test all values in a byte
+  ctext: 01001001
+  flips: 00000000
+         00000001
+         00000010
+         11111111 (255)
+  '''
+  for i in range(len(ciphertext)):
+    for n in range(256):
+      payload = ciphertext[:i] + chr(n) + ciphertext[i + 1:]
+      yield i, oracle(payload)
+
+# }}}
+
+# XOR {{{
 def crack_single_char_xor(ciphertext):
   best_score, best_char = 0, '\x00'
 
@@ -149,34 +181,9 @@ def find_xor_key(ciphertext, keysize):
 
   return key
 
-def byteflip(ciphertext, oracle):
-  '''Flip only one bit in a byte'''
+# }}}
 
-  for i in range(len(ciphertext)):
-    payload = ciphertext[:i] + chr((ord(ciphertext[i]) + 1) % 256) + ciphertext[i + 1:]
-    yield i, oracle(payload)
-
-def bitflip(ciphertext, oracle):
-  '''Flip every bit in a byte'''
-
-  for i in range(len(ciphertext)):
-    for n in range(7, 0, -1):
-      payload = ciphertext[:i] + chr(ord(ciphertext[i]) ^ (1 << n)) + ciphertext[i + 1:]
-      yield i, oracle(payload)
-
-def bitflipall(ciphertext, oracle):
-  '''Test all values in a byte
-  ctext: 01001001
-  flips: 00000000
-         00000001
-         00000010
-         11111111 (255)
-  '''
-  for i in range(len(ciphertext)):
-    for n in range(256):
-      payload = ciphertext[:i] + chr(n) + ciphertext[i + 1:]
-      yield i, oracle(payload)
-
+# ECB {{{
 def detect_ecb(ciphertext):
   for bs in [16, 32, 8, 12, 24]:
     blocks = chunk(ciphertext, bs)
@@ -305,6 +312,9 @@ def decrypt_suffix(encryption_oracle, bs=None, prefix_size=None, suffix_size=Non
 
   return decrypted[:suffix_size]
 
+# }}}
+
+# Padding Oracle {{{
 class PaddingOracle:
   '''Added multithreading to https://github.com/mwielgoszewski/python-paddingoracle'''
 
@@ -429,6 +439,9 @@ class PaddingOracle:
 
     self.resultq.put((block, str(intermediate_bytes)))
 
+# }}}
+
+# CBC {{{
 def encrypt_ecb(msg, key):
   return AES.new(key, mode=AES.MODE_ECB).encrypt(msg)
 
@@ -453,6 +466,9 @@ def decrypt_cbc(msg, key, iv=None):
 
   return result
 
+# }}}
+
+# CTR {{{
 class CTRCipher:
   def __init__(self, key, nonce):
     self.key = key
@@ -478,7 +494,9 @@ class CTRCipher:
   def decrypt(self, msg):
     return self.encrypt(msg) 
 
-# MT19937
+# }}}
+
+# MT19937 {{{
 class MT19937:
   w, n, m, r = 32, 624, 397, 31
   a = 0x9908B0DF
@@ -596,7 +614,9 @@ def mt_encryptdecrypt(msg, key):
 
   return xor(msg, keystream)
 
-# hash length extension
+# }}}
+
+# Hash Length Extension {{{
 class SHA1:
   def __init__(self):
     self._h0, self._h1, self._h2, self._h3, self._h4 = 0x67452301, 0xefcdab89, 0x98badcfe, 0x10325476, 0xc3d2e1f0
@@ -680,7 +700,9 @@ class SHA1:
   def digest(self):
     return hexdigest().decode('hex')
 
-# HMAC
+# }}}
+
+# HMAC {{{
 def hmac_sha1(key, msg):
   if len(key) > 64:
     key = hashlib.sha1(key).digest()
@@ -738,43 +760,30 @@ def break_hmac():
     found += top5[0][0]
     print 'found so far: %r' % found
 
-# Unit Tests
+# }}}
+
+# Unit Tests {{{
 import unittest
 class Tests(unittest.TestCase):
 
-  def test_sha1_hash(self):
-    for size in range(1000):
-      data = random_bytes(size)
+  # Utils {{{
+  def test_pkcs7unpad(self):
 
-      sha = SHA1()
-      sha.update(data)
+    for bs in xrange(100):
+      for msg_size in xrange(bs * 3):
 
-      self.assertTrue(sha.hexdigest() == hashlib.sha1(data).hexdigest())
+        msg = random_bytes(msg_size)
+        padded = pkcs7pad(msg, bs)
+        unpadded = pkcs7unpad(padded)
+        self.assertTrue(unpadded == msg)
 
-  def test_sha1_extend(self):
-    def make_mac(msg):
-      return hashlib.sha1(key + msg).hexdigest()
+        pad = ord(padded[-1])
+        new = padded[-pad:] + chr(pad + 1) * pad
+        with self.assertRaises(PaddingException):
+          pkcs7unpad(new)
+  # }}}
 
-    def check_mac(msg, mac):
-      return mac and mac == make_mac(msg)
-
-    for key_size in range(30):
-      key = random_bytes(key_size)
-
-      for msg_size in range(60):
-        for append_size in range(20):
-
-          msg = random_bytes(msg_size)
-          mac = make_mac(msg)
-
-          append_msg = random_bytes(append_size)
-
-          sha = SHA1()
-          forged_msg = sha.extend(append_msg, msg, mac, key_size)
-          forged_mac = sha.hexdigest()
-
-          self.assertTrue(check_mac(forged_msg, forged_mac))
-
+  # XOR {{{
   def test_find_xor_keysize(self):
     for keysize in range(1, 40):
       key = random_bytes(keysize)
@@ -792,31 +801,25 @@ class Tests(unittest.TestCase):
       found_key = find_xor_key(ciphertext, found_keysize)
 
       self.assertTrue(xor(ciphertext, found_key) == plaintext)
+  # }}}
 
-
-  # TODO add tests with other algorithms (e.g. DES)
-
-  def test_encrypt_decrypt_cbc(self):
-    for key_size in AES.key_size:
-      for msg_size in xrange(AES.block_size * 3):
-        msg = random_bytes(msg_size)
-        key = random_bytes(key_size)
-        iv = random_bytes(AES.block_size)
-        enc = encrypt_cbc(pkcs7pad(msg, AES.block_size), key, iv)
-        dec = pkcs7unpad(decrypt_cbc(enc, key))
-
-        self.assertTrue(dec == msg)
-
+  # ECB {{{
   def test_find_blocksize(self):
 
     def encryption_oracle(s):
-      return encrypt_ecb(pkcs7pad(s, AES.block_size), key)
+      pt = pkcs7pad(s, AES.block_size)
+      if mode == 'ECB':
+        return encrypt_ecb(pt, key)
+      elif mode == 'CBC':
+        return encrypt_cbc(pt, key, iv)
 
-    for key_size in AES.key_size:
-      for _ in xrange(100):
-        key = random_bytes(key_size)
+    for mode in ['ECB', 'CBC']:
+      for key_size in AES.key_size:
+        for _ in xrange(100):
+          key = random_bytes(key_size)
+          iv = random_bytes(AES.block_size)
 
-        self.assertTrue(AES.block_size == find_blocksize(encryption_oracle))
+          self.assertTrue(AES.block_size == find_blocksize(encryption_oracle))
 
   def test_detect_ecb(self):
     '''https://cryptopals.com/sets/2/challenges/11'''
@@ -877,22 +880,69 @@ class Tests(unittest.TestCase):
         decrypted = decrypt_suffix(encryption_oracle)
 
         self.assertTrue(decrypted == sfx)
+  # }}}
 
-  def test_pkcs7unpad(self):
+  # Padding Oracle {{{
+  def test_padding_oracle_encrypt(self):
+    key='YELLOW SUBMARINE'
 
-    for bs in xrange(100):
-      for msg_size in xrange(bs * 3):
+    def oracle_decrypt(data):
+      try:
+        _ = pkcs7unpad(decrypt_cbc(data, key))
+      except PaddingException:
+        return 'error'
 
+    class PadBuster(PaddingOracle):
+      def oracle(self, data):
+        if oracle_decrypt(data) == 'error':
+          raise PaddingException
+
+    padbuster = PadBuster()
+
+    for i in xrange(10):
+      msg = random_bytes(i * AES.block_size + randint(1, AES.block_size))
+      forged = padbuster.encrypt(msg, AES.block_size)
+
+      self.assertTrue(pkcs7unpad(decrypt_cbc(forged, key)) == msg)
+
+  def test_padding_oracle_decrypt(self):
+    key='YELLOW SUBMARINE'
+
+    def oracle_decrypt(data):
+      try:
+        _ = pkcs7unpad(decrypt_cbc(data, key))
+      except PaddingException:
+        return 'error'
+
+    class PadBuster(PaddingOracle):
+      def oracle(self, data):
+        if oracle_decrypt(data) == 'error':
+          raise PaddingException
+
+    padbuster = PadBuster()
+
+    for i in xrange(10):
+      msg = random_bytes(i * AES.block_size + randint(1, AES.block_size))
+      ct = encrypt_cbc(pkcs7pad(msg, AES.block_size), key, random_bytes(AES.block_size))
+      pt = padbuster.decrypt(ct, AES.block_size)
+      self.assertTrue(pkcs7unpad(pt) == msg)
+  # }}}
+
+  # CBC {{{
+  # TODO add tests with other algorithms (e.g. DES)
+  def test_encrypt_decrypt_cbc(self):
+    for key_size in AES.key_size:
+      for msg_size in xrange(AES.block_size * 3):
         msg = random_bytes(msg_size)
-        padded = pkcs7pad(msg, bs)
-        unpadded = pkcs7unpad(padded)
-        self.assertTrue(unpadded == msg)
+        key = random_bytes(key_size)
+        iv = random_bytes(AES.block_size)
+        enc = encrypt_cbc(pkcs7pad(msg, AES.block_size), key, iv)
+        dec = pkcs7unpad(decrypt_cbc(enc, key))
 
-        pad = ord(padded[-1])
-        new = padded[-pad:] + chr(pad + 1) * pad
-        with self.assertRaises(PaddingException):
-          pkcs7unpad(new)
+        self.assertTrue(dec == msg)
+  # }}}
 
+  # CTR {{{
   def test_encrypt_decrypt_ctr(self):
 
     for key_size in AES.key_size:
@@ -901,7 +951,9 @@ class Tests(unittest.TestCase):
         msg = random_bytes(msg_size)
 
       self.assertTrue(CTRCipher(key, 0).decrypt(CTRCipher(key, 0).encrypt(msg)) == msg)
+  # }}}
 
+  # MT19937 {{{
   def test_mt19937(self):
     '''https://cryptopals.com/sets/3/challenges/21'''
     mt1, mt2 = MT19937(), MT19937()
@@ -954,7 +1006,7 @@ class Tests(unittest.TestCase):
 
       self.assertTrue(pt == msg)
 
-  def test_mt19937_recover(self):
+  def test_mt19937_break(self):
     '''https://cryptopals.com/sets/3/challenges/24'''
 
     # break PRNG stream cipher (recover key (16-bit seed)
@@ -992,50 +1044,44 @@ class Tests(unittest.TestCase):
         best_seed = seed
 
     self.assertTrue(best_seed == secret_seed)
+  # }}}
 
-  def test_padding_oracle_encrypt(self):
-    key='YELLOW SUBMARINE'
+  # Hash Length Extension {{{
+  def test_sha1_hash(self):
+    for size in range(1000):
+      data = random_bytes(size)
 
-    def oracle_decrypt(data):
-      try:
-        _ = pkcs7unpad(decrypt_cbc(data, key))
-      except PaddingException:
-        return 'error'
+      sha = SHA1()
+      sha.update(data)
 
-    class PadBuster(PaddingOracle):
-      def oracle(self, data):
-        if oracle_decrypt(data) == 'error':
-          raise PaddingException
+      self.assertTrue(sha.hexdigest() == hashlib.sha1(data).hexdigest())
 
-    padbuster = PadBuster()
+  def test_sha1_extend(self):
+    def make_mac(msg):
+      return hashlib.sha1(key + msg).hexdigest()
 
-    for i in xrange(10):
-      msg = random_bytes(i * AES.block_size + randint(1, AES.block_size))
-      forged = padbuster.encrypt(msg, AES.block_size)
+    def check_mac(msg, mac):
+      return mac and mac == make_mac(msg)
 
-      self.assertTrue(pkcs7unpad(decrypt_cbc(forged, key)) == msg)
+    for key_size in range(30):
+      key = random_bytes(key_size)
 
-  def test_padding_oracle_decrypt(self):
-    key='YELLOW SUBMARINE'
+      for msg_size in range(60):
+        for append_size in range(20):
 
-    def oracle_decrypt(data):
-      try:
-        _ = pkcs7unpad(decrypt_cbc(data, key))
-      except PaddingException:
-        return 'error'
+          msg = random_bytes(msg_size)
+          mac = make_mac(msg)
 
-    class PadBuster(PaddingOracle):
-      def oracle(self, data):
-        if oracle_decrypt(data) == 'error':
-          raise PaddingException
+          append_msg = random_bytes(append_size)
 
-    padbuster = PadBuster()
+          sha = SHA1()
+          forged_msg = sha.extend(append_msg, msg, mac, key_size)
+          forged_mac = sha.hexdigest()
 
-    for i in xrange(10):
-      msg = random_bytes(i * AES.block_size + randint(1, AES.block_size))
-      ct = encrypt_cbc(pkcs7pad(msg, AES.block_size), key, random_bytes(AES.block_size))
-      pt = padbuster.decrypt(ct, AES.block_size)
-      self.assertTrue(pkcs7unpad(pt) == msg)
+          self.assertTrue(check_mac(forged_msg, forged_mac))
+  # }}}
+
+# }}}
 
 if __name__ == '__main__':
   plaintext = '''In 2071, roughly sixty years after an accident with a hyperspace gateway made the Earth uninhabitable, humanity has colonized most of the rocky planets and moons of the Solar System.\n Amid a rising crime rate, the Inter Solar System Police (ISSP) set up a legalized contract system, in which registered bounty hunters (also referred to as "Cowboys") chase criminals and bring them in alive in return for a reward.\n The series protagonists are bounty hunters working from the spaceship Bebop.\n The original crew are Spike Spiegel, an exiled former hitman of the criminal Red Dragon Syndicate, and his partner Jet Black, a former ISSP officer.\n They are later joined by Faye Valentine, an amnesiac con artist; Edward Wong, an eccentric girl skilled in hacking; and Ein, a genetically-engineered Pembroke Welsh Corgi with human-like intelligence.\n Over the course of the series, the team get involved in disastrous mishaps leaving them out of pocket, while often confronting faces and events from their past: these include Jet's reasons for leaving the ISSP, and Faye's past as a young woman from Earth injured in an accident and cryogenically frozen to save her life'''
