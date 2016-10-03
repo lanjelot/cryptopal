@@ -804,6 +804,82 @@ def break_hmac():
 
 # }}}
 
+# Diffie-Hellman {{{
+def derivekey(s):
+    return hashlib.sha1('%x' % s).digest()[:16]
+
+class Peer:
+  def __init__(self, p, g):
+    self.p, self.g = p, g
+
+    self.privkey = int(random_bytes(16).encode('hex'), 16) % p # random.randrange(1, p - 1)
+    self.pubkey = pow(self.g, self.privkey, self.p)
+
+  def create_sharedkey(self, peer_pubkey):
+    s = pow(peer_pubkey, self.privkey, self.p)
+    self.sharedkey = derivekey(s)
+
+  def encrypt(self, msg):
+    return encrypt_cbc(msg, self.sharedkey, random_bytes(16))
+
+  def decrypt(self, msg):
+    return decrypt_cbc(msg, self.sharedkey)
+
+def mitm_dh_fakeg(fake_g):
+  A = Peer(p, g)
+
+  # A->M sends p, g, alice.pubkey (but M doesnt care and sends back fake_g to Alice)
+
+  # M->A sends p, fake_g
+  A = Peer(p, fake_g)
+
+  # A->M sends p, fake_g, alice.pubkey
+  M = Peer(p, fake_g)
+
+  # M->B sends p, fake_g, alice.pubkey
+  B = Peer(p, fake_g)
+  B.create_sharedkey(A.pubkey)
+
+  # B->M sends bob.pubkey
+  M.create_sharedkey(B.pubkey)
+
+  # M->A sends bob.pubkey
+  A.create_sharedkey(B.pubkey)
+
+  assert A.sharedkey == B.sharedkey
+
+  if fake_g == p -1:
+    if A.pubkey == p - 1 and B.pubkey == p - 1:
+      M.sharedkey = derivekey(p - 1)
+    else:
+      M.sharedkey = derivekey(1)
+
+  assert M.sharedkey == A.sharedkey
+
+  # encrypt/decrypt test
+  pt1 = random_bytes(AES.block_size)
+  pt2 = random_bytes(AES.block_size)
+
+  # A->M
+  ct1 = A.encrypt(pt1)
+  assert M.decrypt(ct1) == pt1
+
+  # M->B
+  ct1 = M.encrypt(pt1)
+  assert B.decrypt(ct1) == pt1
+
+  # B->M
+  ct2 = B.encrypt(pt2)
+  assert M.decrypt(ct2) == pt2
+
+  # M->A
+  ct2 = M.encrypt(pt2)
+  assert A.decrypt(ct2) == pt2
+
+  return A, B
+
+# }}}
+
 # Unit Tests {{{
 import unittest
 class Tests(unittest.TestCase):
@@ -1191,10 +1267,89 @@ class Tests(unittest.TestCase):
           self.assertTrue(check_mac(forged_msg, forged_mac))
   # }}}
 
+  # Diffie-Hellman {{{
+  def test_dh(self):
+    A = Peer(p, g)
+    B = Peer(p, g)
+
+    B.create_sharedkey(A.pubkey) # A sends pubkey to B
+    A.create_sharedkey(B.pubkey) # B sends pubkey to A
+
+    self.assertTrue(B.sharedkey == A.sharedkey)
+
+    pt1 = random_bytes(AES.block_size)
+    pt2 = random_bytes(AES.block_size)
+
+    ct1 = A.encrypt(pt1)
+    ct2 = B.encrypt(pt2)
+
+    self.assertTrue(A.decrypt(ct2) == pt2)
+    self.assertTrue(B.decrypt(ct1) == pt1)
+
+  def test_dh_mitm_p(self):
+    '''mitm via sending p as alice.pubkey and bob.pubkey '''
+    '''https://cryptopals.com/sets/5/challenges/34'''
+
+    A = Peer(p, g)
+
+    # A sends p, g, pubkey to M
+    M = Peer(p, g)
+
+    # M sends p, g, p (instead of A.pubkey) to B
+    B = Peer(p, g)
+    B.create_sharedkey(p)
+
+    # B sends pubkey to M (but M doesnt care)
+    M.create_sharedkey(p)
+
+    # M sends p (instead of B.pubkey) to A
+    A.create_sharedkey(p)
+
+    self.assertTrue(M.sharedkey == A.sharedkey)
+    self.assertTrue(M.sharedkey == B.sharedkey)
+
+  def test_dh_mitm_fakeg(self):
+    '''mitm via malicious g '''
+    '''https://cryptopals.com/sets/5/challenges/35'''
+
+    # g = p
+    # pubkey will always be 0 whatever privkey is
+    # because pubkey = pow(p, privkey, p) => 0
+    # and so sharedkey will always be 0
+    # because sharedkey = pow(pubkey, privkey, p) => 0
+    A, B = mitm_dh_fakeg(p)
+
+    self.assertTrue(A.sharedkey == derivekey(0))
+    self.assertTrue(B.sharedkey == derivekey(0))
+
+    # g = 1
+    # pubkey will always be 1 whatever privkey is
+    # because pubkey = pow(1, privkey, p) => 1
+    # and so sharedkey will always be 1
+    # because sharedkey = pow(1, privkey, p) => 1
+    A, B = mitm_dh_fakeg(1)
+
+    self.assertTrue(A.sharedkey == derivekey(1))
+    self.assertTrue(B.sharedkey == derivekey(1))
+
+    # g = p - 1
+    # pubkey will always be p - 1 or 1
+    # because pubkey = pow(p - 1, privkey, p) => p - 1 or 1
+    # and so sharedkey will always be p - 1 or 1
+    # because sharedkey = pow(p - 1, privkey, p) => p - 1 or 1
+    A, B = mitm_dh_fakeg(p - 1)
+
+    self.assertTrue((A.sharedkey == derivekey(p - 1) and B.sharedkey == derivekey(p - 1)) or (A.sharedkey == derivekey(1) and B.sharedkey == derivekey(1)))
+  # }}}
+
 # }}}
 
 if __name__ == '__main__':
   plaintext = '''In 2071, roughly sixty years after an accident with a hyperspace gateway made the Earth uninhabitable, humanity has colonized most of the rocky planets and moons of the Solar System.\n Amid a rising crime rate, the Inter Solar System Police (ISSP) set up a legalized contract system, in which registered bounty hunters (also referred to as "Cowboys") chase criminals and bring them in alive in return for a reward.\n The series protagonists are bounty hunters working from the spaceship Bebop.\n The original crew are Spike Spiegel, an exiled former hitman of the criminal Red Dragon Syndicate, and his partner Jet Black, a former ISSP officer.\n They are later joined by Faye Valentine, an amnesiac con artist; Edward Wong, an eccentric girl skilled in hacking; and Ein, a genetically-engineered Pembroke Welsh Corgi with human-like intelligence.\n Over the course of the series, the team get involved in disastrous mishaps leaving them out of pocket, while often confronting faces and events from their past: these include Jet's reasons for leaving the ISSP, and Faye's past as a young woman from Earth injured in an accident and cryogenically frozen to save her life'''
+
+  p = 0xffffffffffffffffc90fdaa22168c234c4c6628b80dc1cd129024e088a67cc74020bbea63b139b22514a08798e3404ddef9519b3cd3a431b302b0a6df25f14374fe1356d6d51c245e485b576625e7ec6f44c42e9a637ed6b0bff5cb6f406b7edee386bfb5a899fa5ae9f24117c4b1fe649286651ece45b3dc2007cb8a163bf0598da48361c55d39a69163fa8fd24cf5f83655d23dca3ad961c62f356208552bb9ed529077096966d670c354e4abc9804f1746c08ca237327ffffffffffffffff
+  g = 2
+
   unittest.main()
 
 # vim: ts=2 sw=2 sts=2 et fdm=marker bg=dark
