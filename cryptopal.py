@@ -1,3 +1,21 @@
+# Copyright (C) 2016 Sebastien MACKE
+#
+# This program is free software; you can redistribute it and/or modify it under
+# the terms of the GNU General Public License version 2, as published by the
+# Free Software Foundation
+#
+# This program is distributed in the hope that it will be useful, but WITHOUT
+# ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
+# FOR A PARTICULAR PURPOSE. See the GNU General Public License for more
+# details (http://www.gnu.org/licenses/gpl.txt).
+
+__author__  = 'Sebastien Macke'
+__email__   = 'lanjelot@gmail.com'
+__url__     = 'https://github.com/lanjelot/cryptopal'
+__twitter__ = 'https://twitter.com/lanjelot'
+__version__ = '0.0'
+__license__ = 'GPLv2'
+
 from collections import Counter, defaultdict
 from Crypto.Cipher import AES
 from Crypto.Util.number import long_to_bytes, bytes_to_long
@@ -9,6 +27,8 @@ from threading import Thread
 from Queue import Queue, Empty
 import struct
 import logging
+import string
+import requests
 
 # Utils {{{
 def base36encode(number):
@@ -68,6 +88,14 @@ def pkcs7unpad(s):
 class PaddingException(Exception):
   pass
 
+class Timing:
+  def __enter__(self):
+    self.t1 = time()
+    return self
+
+  def __exit__(self, exc_type, exc_value, traceback):
+    self.time = time() - self.t1
+
 def pairwise(iterable):
     "s -> (s0,s1), (s1,s2), (s2, s3), ..."
     a, b = itertools.tee(iterable)
@@ -84,11 +112,14 @@ def score_english(msg):
   for c in msg:
     where = english.find(c)
     if where == -1:
-      continue
+      #continue
+      score -= len(english)
     else:
-      score += (len(english) - where) * 2
+      #score += (len(english) - where) * 2
+      score += len(english) - where
 
-  return score, stats
+  #return score, stats
+  return score / len(msg), stats
 
 def count_printable(msg):
   return len([c for c in msg if ord(c) >= 0x20 and ord(c) < 0x7f])
@@ -159,22 +190,25 @@ def find_xor_keysize(ciphertext):
   
   return sorted(distances.items(), key=lambda x: x[1])
 
-def find_xor_key(ciphertext, keysize):
+def transpose(text, size):
+  '''[[1,2,3], [1,2,3], [1,2,3]] => [[1,1,1], [2,2,2], [3,3,3]]'''
   transposed = []
 
-  for i in range(0, keysize):
-
+  for i in range(size):
     chars = ''
-
-    for block in chunk(ciphertext, keysize):
-
+    for block in chunk(text, size):
       if i >= len(block):
         break
 
       chars += block[i]
-  
+
     transposed.append(chars)
-  
+
+  return transposed
+
+def find_xor_key(ciphertext, keysize):
+  transposed = transpose(ciphertext, keysize)
+
   key = ''
   for chars in transposed:
     key += crack_single_char_xor(chars)
@@ -185,6 +219,7 @@ def find_xor_key(ciphertext, keysize):
 
 # ECB {{{
 def detect_ecb(ciphertext):
+  '''https://cryptopals.com/sets/1/challenges/8'''
   for bs in [16, 32, 8, 12, 24]:
     blocks = chunk(ciphertext, bs)
     stats = Counter(blocks)
@@ -311,6 +346,33 @@ def decrypt_suffix(encryption_oracle, bs=None, prefix_size=None, suffix_size=Non
       decrypted += '?'
 
   return decrypted[:suffix_size]
+
+# }}}
+
+# CBC {{{
+def encrypt_ecb(msg, key):
+  return AES.new(key, mode=AES.MODE_ECB).encrypt(msg)
+
+def decrypt_ecb(msg, key):
+  return AES.new(key, mode=AES.MODE_ECB).decrypt(msg)
+
+def encrypt_cbc(msg, key, iv):
+  ct = iv
+  result = ''
+  for pt in chunk(msg, AES.block_size):
+    ct = encrypt_ecb(xor(ct, pt), key)
+    result += ct
+
+  return iv + result
+
+def decrypt_cbc(msg, key, iv=None):
+  if iv:
+    msg = iv + msg
+  result = ''
+  for prev_ct, ct in pairwise(chunk(msg, AES.block_size)):
+    result += xor(prev_ct, decrypt_ecb(ct, key))
+
+  return result
 
 # }}}
 
@@ -441,35 +503,10 @@ class PaddingOracle:
 
 # }}}
 
-# CBC {{{
-def encrypt_ecb(msg, key):
-  return AES.new(key, mode=AES.MODE_ECB).encrypt(msg)
-
-def decrypt_ecb(msg, key):
-  return AES.new(key, mode=AES.MODE_ECB).decrypt(msg)
-
-def encrypt_cbc(msg, key, iv):
-  ct = iv
-  result = ''
-  for pt in chunk(msg, AES.block_size):
-    ct = encrypt_ecb(xor(ct, pt), key)
-    result += ct
-
-  return iv + result
-
-def decrypt_cbc(msg, key, iv=None):
-  if iv:
-    msg = iv + msg
-  result = ''
-  for prev_ct, ct in pairwise(chunk(msg, AES.block_size)):
-    result += xor(prev_ct, decrypt_ecb(ct, key))
-
-  return result
-
-# }}}
-
 # CTR {{{
 class CTRCipher:
+  '''https://cryptopals.com/sets/3/challenges/18'''
+
   def __init__(self, key, nonce):
     self.key = key
     self.nonce = nonce
@@ -493,6 +530,16 @@ class CTRCipher:
 
   def decrypt(self, msg):
     return self.encrypt(msg) 
+
+  def edit(self, ciphertext, offset, newtext):
+    '''seek into the ciphertext and re-encrypt with different plaintext (faster than edit2)'''
+    newct = self.encrypt('A' * offset + newtext)[offset:]
+    return ciphertext[:offset] + newct + ciphertext[offset + len(newtext):]
+
+  def edit2(self, ciphertext, offset, newtext):
+    '''seek into the ciphertext, decrypt and re-encrypt with different plaintext'''
+    pt = self.decrypt(ciphertext[:offset])
+    return self.encrypt(pt + newtext) + ciphertext[offset + len(newtext):]
 
 # }}}
 
@@ -704,6 +751,7 @@ class SHA1:
 
 # HMAC {{{
 def hmac_sha1(key, msg):
+  '''https://cryptopals.com/sets/4/challenges/31'''
   if len(key) > 64:
     key = hashlib.sha1(key).digest()
   if len(key) < 64:
@@ -712,16 +760,6 @@ def hmac_sha1(key, msg):
   i_key_pad = xor('\x36' * 64, key)
   return hashlib.sha1(o_key_pad + hashlib.sha1(i_key_pad + msg).digest()).digest()
 
-def hmac_oracle_mock(msg, sig):
-  key = 'you will never guess my key'
-  sleep(randint(0, 5) / 1000)
-  return insecure_compare(hmac_sha1(key, msg), sig)
-
-import requests
-def hmac_oracle(msg, sig):
-  r = requests.get('http://127.0.0.1:8181/?file=%s&signature=%s' % (msg, sig.encode('hex')))
-  return r.status_code == 200
-
 def insecure_compare(s1, s2):
   for c1, c2 in zip(s1, s2):
     if c1 != c2:
@@ -729,15 +767,18 @@ def insecure_compare(s1, s2):
     sleep(.005)
   return True
 
-class Timing:
-  def __enter__(self):
-    self.t1 = time()
-    return self
+def hmac_oracle_mock(msg, sig):
+  key = 'you will never guess my key'
+  sleep(randint(0, 5) / 1000)
+  return insecure_compare(hmac_sha1(key, msg), sig)
 
-  def __exit__(self, exc_type, exc_value, traceback):
-    self.time = time() - self.t1
+def hmac_oracle(msg, sig):
+  r = requests.get('http://127.0.0.1:8181/?file=%s&signature=%s' % (msg, sig.encode('hex')))
+  return r.status_code == 200
 
+# attack takes too long to be in unit tests
 def break_hmac():
+  '''https://cryptopals.com/sets/4/challenges/32'''
   filename = '/etc/passwd'
   found = ''
 
@@ -748,6 +789,7 @@ def break_hmac():
       for c in map(chr, range(256)):
         signature = found + c + '\x00' * (20 - 1 - len(found))
         with Timing() as timing:
+          #if hmac_oracle(filename, signature): # needs hmac_break_server.py running
           if hmac_oracle_mock(filename, signature):
             print 'found signature for %s is %r' % (filename, found)
             return found
@@ -768,7 +810,6 @@ class Tests(unittest.TestCase):
 
   # Utils {{{
   def test_pkcs7unpad(self):
-
     for bs in xrange(100):
       for msg_size in xrange(bs * 3):
 
@@ -882,6 +923,50 @@ class Tests(unittest.TestCase):
         self.assertTrue(decrypted == sfx)
   # }}}
 
+  # CBC {{{
+  # TODO add tests with other algorithms (e.g. DES)
+  def test_cbc_encrypt_decrypt(self):
+    for key_size in AES.key_size:
+      for msg_size in xrange(AES.block_size * 3):
+        msg = random_bytes(msg_size)
+        key = random_bytes(key_size)
+        iv = random_bytes(AES.block_size)
+
+        enc = encrypt_cbc(pkcs7pad(msg, AES.block_size), key, iv)
+        dec = pkcs7unpad(decrypt_cbc(enc, key))
+
+        self.assertTrue(dec == msg)
+
+  def test_cbc_ivkey_recover(self):
+    '''Recover the key from CBC with IV=Key '''
+    '''https://cryptopals.com/sets/4/challenges/27'''
+
+    for msg_size in xrange(100):
+
+      key = random_bytes(AES.block_size) # key must be same length as iv
+
+      def leak(s):
+        dec = decrypt_cbc(s, key, iv=key)
+
+        if any(x for x in dec if x not in string.printable):
+          raise ValueError('non compliant message: %s' % dec)
+
+      pt = random_printables(msg_size)
+      ct = encrypt_cbc(pt, key, iv=key)
+
+      c0 = chunk(ct, AES.block_size)[0]
+      payload = c0 + '\x00' * AES.block_size + c0
+
+      try:
+        leak(payload)
+      except ValueError as e:
+        decrypted = chunk(e.message[23:], AES.block_size)
+        recovered = xor(decrypted[0], decrypted[2])
+
+      self.assertTrue(key == recovered)
+
+  # }}}
+
   # Padding Oracle {{{
   def test_padding_oracle_encrypt(self):
     key='YELLOW SUBMARINE'
@@ -928,29 +1013,50 @@ class Tests(unittest.TestCase):
       self.assertTrue(pkcs7unpad(pt) == msg)
   # }}}
 
-  # CBC {{{
-  # TODO add tests with other algorithms (e.g. DES)
-  def test_encrypt_decrypt_cbc(self):
-    for key_size in AES.key_size:
-      for msg_size in xrange(AES.block_size * 3):
-        msg = random_bytes(msg_size)
-        key = random_bytes(key_size)
-        iv = random_bytes(AES.block_size)
-        enc = encrypt_cbc(pkcs7pad(msg, AES.block_size), key, iv)
-        dec = pkcs7unpad(decrypt_cbc(enc, key))
-
-        self.assertTrue(dec == msg)
-  # }}}
-
   # CTR {{{
-  def test_encrypt_decrypt_ctr(self):
+  def test_ctr_encrypt_decrypt(self):
+    '''https://cryptopals.com/sets/3/challenges/18'''
 
     for key_size in AES.key_size:
-      for msg_size in xrange(1, 1000):
+      for msg_size in xrange(1, 100):
         key = random_bytes(key_size)
         msg = random_bytes(msg_size)
 
       self.assertTrue(CTRCipher(key, 0).decrypt(CTRCipher(key, 0).encrypt(msg)) == msg)
+
+  def test_ctr_edit(self):
+    key = random_bytes(16)
+    nonce = int(random_bytes(8).encode('hex'), 16)
+
+    msg_size = 100
+    msg = random_bytes(msg_size)
+
+    for offset in xrange(msg_size):
+      newtext_size = randint(1, msg_size - offset)
+      newtext = random_bytes(newtext_size)
+
+      ctr = CTRCipher(key, nonce)
+      ct = ctr.encrypt(msg)
+
+      newct = ctr.edit(ct, offset, newtext)
+      pt = ctr.decrypt(newct)
+
+      new_msg = msg[:offset] + newtext + msg[offset + newtext_size:]
+
+      self.assertTrue(pt == new_msg)
+
+  def test_ctr_break_edit(self):
+    '''https://cryptopals.com/sets/4/challenges/25'''
+
+    key = random_bytes(16)
+    nonce = int(random_bytes(8).encode('hex'), 16)
+
+    ctr = CTRCipher(key, nonce)
+    ciphertext = ctr.encrypt(plaintext)
+
+    recovered = ctr.edit(ciphertext, 0, ciphertext)
+    self.assertTrue(plaintext == recovered)
+
   # }}}
 
   # MT19937 {{{
@@ -1048,6 +1154,8 @@ class Tests(unittest.TestCase):
 
   # Hash Length Extension {{{
   def test_sha1_hash(self):
+    '''https://cryptopals.com/sets/4/challenges/28'''
+
     for size in range(1000):
       data = random_bytes(size)
 
@@ -1057,6 +1165,8 @@ class Tests(unittest.TestCase):
       self.assertTrue(sha.hexdigest() == hashlib.sha1(data).hexdigest())
 
   def test_sha1_extend(self):
+    '''https://cryptopals.com/sets/4/challenges/29'''
+
     def make_mac(msg):
       return hashlib.sha1(key + msg).hexdigest()
 
