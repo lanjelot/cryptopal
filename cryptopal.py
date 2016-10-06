@@ -20,8 +20,10 @@ from collections import Counter, defaultdict
 from Crypto.Cipher import AES
 from Crypto.Util.number import long_to_bytes, bytes_to_long
 from random import randint, shuffle
+import random
 import itertools
 import hashlib
+import hmac
 from time import time, sleep
 from threading import Thread
 from Queue import Queue, Empty
@@ -151,6 +153,9 @@ def bitflipall(ciphertext, oracle):
     for n in range(256):
       payload = ciphertext[:i] + chr(n) + ciphertext[i + 1:]
       yield i, oracle(payload)
+
+def sha256(s):
+  return hashlib.sha256(s).digest()
 
 # }}}
 
@@ -585,7 +590,7 @@ class MT19937:
     y = y ^ y << MT19937.t & MT19937.c
     y = y ^ y >> MT19937.l
 
-    self.index = self.index + 1
+    self.index += 1
 
     return to_int32(y)
 
@@ -623,7 +628,7 @@ class MT19937:
     return y
 
 def to_int32(x):
-  ''' Get the 32 least significant bits'''
+  '''Get the 32 least significant bits'''
   return int(0xffffffff & x)
 
 def get_MSB(x, n):
@@ -660,6 +665,18 @@ def mt_encryptdecrypt(msg, key):
     keystream = keystream[:len(msg)]
 
   return xor(msg, keystream)
+
+def get_bit(n, b):
+    '''Return the b-th rightmost bit of n'''
+    return ((1 << b) & n) >> b
+
+def set_bit(n, b, x):
+    '''Return n with the b-th rightmost bit set to x'''
+    if x == 0:
+      return ~(1 << b) & n
+
+    if x == 1:
+      return (1 << b) | n
 
 # }}}
 
@@ -805,19 +822,23 @@ def break_hmac():
 # }}}
 
 # Diffie-Hellman {{{
+def keygen_dh(p, g):
+    privkey = bytes_to_long(random_bytes(16)) % p
+    pubkey = pow(g, privkey, p)
+
+    return privkey, pubkey
+
 def derivekey(s):
     return hashlib.sha1('%x' % s).digest()[:16]
 
-class Peer:
+class DH_Peer:
   def __init__(self, p, g):
     self.p, self.g = p, g
+    self.privkey, self.pubkey = keygen_dh(self.p, self.g)
 
-    self.privkey = int(random_bytes(16).encode('hex'), 16) % p # random.randrange(1, p - 1)
-    self.pubkey = pow(self.g, self.privkey, self.p)
-
-  def create_sharedkey(self, peer_pubkey):
-    s = pow(peer_pubkey, self.privkey, self.p)
-    self.sharedkey = derivekey(s)
+  def compute_sharedkey(self, peer_pubkey):
+    secret = pow(peer_pubkey, self.privkey, self.p)
+    self.sharedkey = derivekey(secret)
 
   def encrypt(self, msg):
     return encrypt_cbc(msg, self.sharedkey, random_bytes(16))
@@ -825,28 +846,44 @@ class Peer:
   def decrypt(self, msg):
     return decrypt_cbc(msg, self.sharedkey)
 
-def mitm_dh_fakeg(fake_g):
-  A = Peer(p, g)
+def mitm_dh_p(p, g):
+    A = DH_Peer(p, g)
 
-  # A->M sends p, g, alice.pubkey (but M doesnt care and sends back fake_g to Alice)
+    # A->M sends p, g, pubkey
+    M = DH_Peer(p, g)
+
+    # M->B sends p, g, p (instead of A.pubkey)
+    B = DH_Peer(p, g)
+    B.compute_sharedkey(p)
+
+    # B->M sends pubkey (but M doesnt care)
+    M.compute_sharedkey(p)
+
+    # M->A sends p (instead of B.pubkey)
+    A.compute_sharedkey(p)
+
+    return A, B, M
+
+def mitm_dh_fakeg(p, g, fake_g):
+  A = DH_Peer(p, g)
+
+  # A->M sends p, g (but M doesnt care and sends back fake_g to A)
 
   # M->A sends p, fake_g
-  A = Peer(p, fake_g)
+  A = DH_Peer(p, fake_g)
 
-  # A->M sends p, fake_g, alice.pubkey
-  M = Peer(p, fake_g)
+  # A->M sends p, fake_g, A.pubkey
+  M = DH_Peer(p, fake_g)
 
-  # M->B sends p, fake_g, alice.pubkey
-  B = Peer(p, fake_g)
-  B.create_sharedkey(A.pubkey)
+  # M->B sends p, fake_g, A.pubkey
+  B = DH_Peer(p, fake_g)
+  B.compute_sharedkey(A.pubkey)
 
-  # B->M sends bob.pubkey
-  M.create_sharedkey(B.pubkey)
+  # B->M sends B.pubkey
+  M.compute_sharedkey(B.pubkey)
 
-  # M->A sends bob.pubkey
-  A.create_sharedkey(B.pubkey)
-
-  assert A.sharedkey == B.sharedkey
+  # M->A sends B.pubkey
+  A.compute_sharedkey(B.pubkey)
 
   if fake_g == p -1:
     if A.pubkey == p - 1 and B.pubkey == p - 1:
@@ -854,9 +891,14 @@ def mitm_dh_fakeg(fake_g):
     else:
       M.sharedkey = derivekey(1)
 
-  assert M.sharedkey == A.sharedkey
+  return A, B, M
 
-  # encrypt/decrypt test
+def is_mitm(A, B, M):
+  '''confirm M can encrypt and decrypt any message between A and B'''
+
+  assert A.sharedkey == B.sharedkey
+  assert M.sharedkey == B.sharedkey
+
   pt1 = random_bytes(AES.block_size)
   pt2 = random_bytes(AES.block_size)
 
@@ -876,7 +918,140 @@ def mitm_dh_fakeg(fake_g):
   ct2 = M.encrypt(pt2)
   assert A.decrypt(ct2) == pt2
 
-  return A, B
+  return True
+
+# }}}
+
+# SRP {{
+class SRP_Peer:
+  '''Implement Secure Remote Password https://cryptopals.com/sets/5/challenges/36'''
+
+  def __init__(self, email, password, N=0xffffffffffffffffc90fdaa22168c234c4c6628b80dc1cd129024e088a67cc74020bbea63b139b22514a08798e3404ddef9519b3cd3a431b302b0a6df25f14374fe1356d6d51c245e485b576625e7ec6f44c42e9a637ed6b0bff5cb6f406b7edee386bfb5a899fa5ae9f24117c4b1fe649286651ece45b3dc2007cb8a163bf0598da48361c55d39a69163fa8fd24cf5f83655d23dca3ad961c62f356208552bb9ed529077096966d670c354e4abc9804f1746c08ca237327ffffffffffffffff, g=2, k=3):
+    self.N = N
+    self.g = g
+    self.k = k
+
+    self.email = email
+    self.password = password
+
+    self.privkey, self.pubkey = keygen_dh(self.N, self.g)
+
+  def sign_salt(self):
+    return hmac.new(self.K, self.salt, hashlib.sha256).hexdigest()
+
+def compute_u(server_pubkey, client_pubkey):
+  return bytes_to_long(sha256(str(server_pubkey) + str(client_pubkey)))
+
+class SRP_Client(SRP_Peer):
+
+  def compute_sharedkey(self, salt, server_pubkey):
+    self.salt = salt
+
+    u = compute_u(server_pubkey, self.pubkey)
+    x = bytes_to_long(sha256(self.salt + self.password))
+    gx = pow(self.g, x, self.N)
+    S = pow(server_pubkey - self.k * gx, self.privkey + u * x, self.N)
+
+    self.K = sha256(str(S))
+
+  def compute_sharedkey_bypass(self, salt, server_pubkey):
+    self.salt = salt
+    self.K = sha256('0')
+
+  def compute_sharedkey_simplified(self, salt, server_pubkey, u):
+    self.salt = salt
+
+    # this time u is provided by the server
+    x = bytes_to_long(sha256(self.salt + self.password))
+    S = pow(server_pubkey, self.privkey + u * x, self.N)
+
+    self.K = sha256(str(S))
+
+class SRP_Server(SRP_Peer):
+
+  def compute_sharedkey(self, email, client_pubkey): # aka. recv_login()
+    assert self.email == email
+
+    self.salt = random_bytes(4)
+
+    x = bytes_to_long(sha256(self.salt + self.password))
+    v = pow(self.g, x, self.N)
+
+    self.pubkey = (self.k * v + self.pubkey) % self.N
+    u = compute_u(self.pubkey, client_pubkey)
+
+    vu = pow(v, u, self.N)
+    S = pow(client_pubkey * vu, self.privkey, self.N)
+
+    self.K = sha256(str(S))
+
+  def compute_sharedkey_simplified(self, email, client_pubkey):
+    assert self.email == email
+
+    self.salt = random_bytes(4)
+
+    x = bytes_to_long(sha256(self.salt + self.password))
+    v = pow(self.g, x, self.N)
+
+    self.pubkey = pow(self.g, self.privkey, self.N) # this time the server pubkey doesn't depend on the password
+    self.u = bytes_to_long(random_bytes(16)) # this time u is a 128 bit random number
+
+    vu = pow(v, self.u, self.N)
+    S = pow(client_pubkey * vu, self.privkey, self.N)
+
+    self.K = sha256(str(S))
+
+  def check_mac(self, mac):
+    return self.sign_salt() == mac
+
+def srp_normal():
+  email = 'client@example.com'
+  password = 'Welcome123'
+
+  server = SRP_Server(email, password)
+  client = SRP_Client(email, password)
+
+  server.compute_sharedkey(client.email, client.pubkey) # C->S sends C.login and C.pubkey
+  client.compute_sharedkey(server.salt, server.pubkey) # S->C sends S.salt and S.pubkey
+
+  return server, client
+
+def srp_bypass(fake_pubkey):
+  email = 'client@example.com'
+  password = 'St0ngP@ssw0rd'
+
+  server = SRP_Server(email, password)
+  client = SRP_Client(email, 'idontneedapassword')
+
+  server.compute_sharedkey(client.email, fake_pubkey) # (C.login, 0) -> S (or N, N*2 ...)
+  client.compute_sharedkey_bypass(server.salt, server.pubkey) # (S.salt, S.pubkey) -> C
+
+  return server, client
+
+def srp_mitm():
+  email = 'client@example.com'
+  password = random_chars(4, charset='0123456789')
+
+  server = SRP_Server(email, 'iwilljustcrackit')
+  client = SRP_Client(email, password)
+
+  server.compute_sharedkey_simplified(client.email, client.pubkey) # (C.login, C.pubkey) -> S
+  client.compute_sharedkey_simplified(server.salt, server.pubkey, server.u) # (S.salt, S.pubkey, S.u) -> C
+
+  return server, client
+
+def srp_crack_password(server, client_g, client_N, client_pubkey, mac):
+
+  for pw in itertools.imap(string.join, itertools.product('0123456789', repeat=4)):
+    x = bytes_to_long(sha256(server.salt + pw))
+    v = pow(client_g, x, client_N)
+    vu = pow(v, server.u, client_N)
+
+    S = pow(client_pubkey * vu, server.privkey, client_N)
+    K = sha256(str(S))
+
+    if hmac.new(K, server.salt, hashlib.sha256).hexdigest() == mac:
+      return pw
 
 # }}}
 
@@ -1269,11 +1444,11 @@ class Tests(unittest.TestCase):
 
   # Diffie-Hellman {{{
   def test_dh(self):
-    A = Peer(p, g)
-    B = Peer(p, g)
+    A = DH_Peer(p, g)
+    B = DH_Peer(p, g)
 
-    B.create_sharedkey(A.pubkey) # A sends pubkey to B
-    A.create_sharedkey(B.pubkey) # B sends pubkey to A
+    B.compute_sharedkey(A.pubkey) # A sends pubkey to B
+    A.compute_sharedkey(B.pubkey) # B sends pubkey to A
 
     self.assertTrue(B.sharedkey == A.sharedkey)
 
@@ -1287,26 +1462,14 @@ class Tests(unittest.TestCase):
     self.assertTrue(B.decrypt(ct1) == pt1)
 
   def test_dh_mitm_p(self):
-    '''mitm via sending p as alice.pubkey and bob.pubkey '''
+    '''mitm via sending p as A.pubkey and B.pubkey '''
     '''https://cryptopals.com/sets/5/challenges/34'''
 
-    A = Peer(p, g)
-
-    # A sends p, g, pubkey to M
-    M = Peer(p, g)
-
-    # M sends p, g, p (instead of A.pubkey) to B
-    B = Peer(p, g)
-    B.create_sharedkey(p)
-
-    # B sends pubkey to M (but M doesnt care)
-    M.create_sharedkey(p)
-
-    # M sends p (instead of B.pubkey) to A
-    A.create_sharedkey(p)
+    A, B, M = mitm_dh_p(p, g)
 
     self.assertTrue(M.sharedkey == A.sharedkey)
     self.assertTrue(M.sharedkey == B.sharedkey)
+    self.assertTrue(is_mitm(A, B, M))
 
   def test_dh_mitm_fakeg(self):
     '''mitm via malicious g '''
@@ -1317,29 +1480,63 @@ class Tests(unittest.TestCase):
     # because pubkey = pow(p, privkey, p) => 0
     # and so sharedkey will always be 0
     # because sharedkey = pow(pubkey, privkey, p) => 0
-    A, B = mitm_dh_fakeg(p)
+    A, B, M = mitm_dh_fakeg(p, g, p)
 
     self.assertTrue(A.sharedkey == derivekey(0))
     self.assertTrue(B.sharedkey == derivekey(0))
+    self.assertTrue(is_mitm(A, B, M))
 
     # g = 1
     # pubkey will always be 1 whatever privkey is
     # because pubkey = pow(1, privkey, p) => 1
     # and so sharedkey will always be 1
     # because sharedkey = pow(1, privkey, p) => 1
-    A, B = mitm_dh_fakeg(1)
+    A, B, M = mitm_dh_fakeg(p, g, 1)
 
     self.assertTrue(A.sharedkey == derivekey(1))
     self.assertTrue(B.sharedkey == derivekey(1))
+    self.assertTrue(is_mitm(A, B, M))
 
     # g = p - 1
     # pubkey will always be p - 1 or 1
     # because pubkey = pow(p - 1, privkey, p) => p - 1 or 1
     # and so sharedkey will always be p - 1 or 1
     # because sharedkey = pow(p - 1, privkey, p) => p - 1 or 1
-    A, B = mitm_dh_fakeg(p - 1)
+    A, B, M = mitm_dh_fakeg(p, g, p - 1)
 
     self.assertTrue((A.sharedkey == derivekey(p - 1) and B.sharedkey == derivekey(p - 1)) or (A.sharedkey == derivekey(1) and B.sharedkey == derivekey(1)))
+    self.assertTrue(is_mitm(A, B, M))
+  # }}}
+
+  # SRP {{{
+  def test_srp_normal(self):
+    server, client = srp_normal()
+
+    self.assertTrue(server.check_mac(client.sign_salt()) == True)
+
+  def test_srp_bypass(self):
+    '''https://cryptopals.com/sets/5/challenges/37'''
+    '''client sends 0 as its pubkey (or N, N*2, etc.)'''
+
+    for fake_pubkey in [0, p, p*2]:
+      server, client = srp_bypass(fake_pubkey)
+
+      self.assertTrue(server.check_mac(client.sign_salt()) == True)
+
+      # both sides now have
+      self.assertTrue(server.K == sha256('0'))
+      self.assertTrue(client.K == sha256('0'))
+
+  def test_srp_mitm(self):
+  '''https://cryptopals.com/sets/5/challenges/38'''
+  '''mitm can crack client's password offline'''
+
+    server, client = srp_mitm()
+    mac = client.sign_salt()
+    found = srp_crack_password(server, client.g, client.N, client.pubkey, mac)
+
+    self.assertTrue(found == client.password)
+
   # }}}
 
 # }}}
