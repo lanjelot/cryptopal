@@ -510,8 +510,6 @@ class PaddingOracle:
 
 # CTR {{{
 class CTRCipher:
-  '''https://cryptopals.com/sets/3/challenges/18'''
-
   def __init__(self, key, nonce):
     self.key = key
     self.nonce = nonce
@@ -847,22 +845,22 @@ class DH_Peer:
     return decrypt_cbc(msg, self.sharedkey)
 
 def mitm_dh_p(p, g):
-    A = DH_Peer(p, g)
+  A = DH_Peer(p, g)
 
-    # A->M sends p, g, pubkey
-    M = DH_Peer(p, g)
+  # A->M sends p, g, pubkey
+  M = DH_Peer(p, g)
 
-    # M->B sends p, g, p (instead of A.pubkey)
-    B = DH_Peer(p, g)
-    B.compute_sharedkey(p)
+  # M->B sends p, g, p (instead of A.pubkey)
+  B = DH_Peer(p, g)
+  B.compute_sharedkey(p)
 
-    # B->M sends pubkey (but M doesnt care)
-    M.compute_sharedkey(p)
+  # B->M sends pubkey (but M doesnt care)
+  M.compute_sharedkey(p)
 
-    # M->A sends p (instead of B.pubkey)
-    A.compute_sharedkey(p)
+  # M->A sends p (instead of B.pubkey)
+  A.compute_sharedkey(p)
 
-    return A, B, M
+  return A, B, M
 
 def mitm_dh_fakeg(p, g, fake_g):
   A = DH_Peer(p, g)
@@ -922,10 +920,8 @@ def is_mitm(A, B, M):
 
 # }}}
 
-# SRP {{
+# SRP {{{
 class SRP_Peer:
-  '''Implement Secure Remote Password https://cryptopals.com/sets/5/challenges/36'''
-
   def __init__(self, email, password, N=0xffffffffffffffffc90fdaa22168c234c4c6628b80dc1cd129024e088a67cc74020bbea63b139b22514a08798e3404ddef9519b3cd3a431b302b0a6df25f14374fe1356d6d51c245e485b576625e7ec6f44c42e9a637ed6b0bff5cb6f406b7edee386bfb5a899fa5ae9f24117c4b1fe649286651ece45b3dc2007cb8a163bf0598da48361c55d39a69163fa8fd24cf5f83655d23dca3ad961c62f356208552bb9ed529077096966d670c354e4abc9804f1746c08ca237327ffffffffffffffff, g=2, k=3):
     self.N = N
     self.g = g
@@ -943,7 +939,6 @@ def compute_u(server_pubkey, client_pubkey):
   return bytes_to_long(sha256(str(server_pubkey) + str(client_pubkey)))
 
 class SRP_Client(SRP_Peer):
-
   def compute_sharedkey(self, salt, server_pubkey):
     self.salt = salt
 
@@ -968,7 +963,6 @@ class SRP_Client(SRP_Peer):
     self.K = sha256(str(S))
 
 class SRP_Server(SRP_Peer):
-
   def compute_sharedkey(self, email, client_pubkey): # aka. recv_login()
     assert self.email == email
 
@@ -1011,8 +1005,8 @@ def srp_normal():
   server = SRP_Server(email, password)
   client = SRP_Client(email, password)
 
-  server.compute_sharedkey(client.email, client.pubkey) # C->S sends C.login and C.pubkey
-  client.compute_sharedkey(server.salt, server.pubkey) # S->C sends S.salt and S.pubkey
+  server.compute_sharedkey(client.email, client.pubkey) # (C.login, C.pubkey) -> S
+  client.compute_sharedkey(server.salt, server.pubkey) # (S.salt, S.pubkey) -> C
 
   return server, client
 
@@ -1041,8 +1035,7 @@ def srp_mitm():
   return server, client
 
 def srp_crack_password(server, client_g, client_N, client_pubkey, mac):
-
-  for pw in itertools.imap(string.join, itertools.product('0123456789', repeat=4)):
+  for pw in itertools.imap(lambda p: ''.join(p), itertools.product('0123456789', repeat=4)):
     x = bytes_to_long(sha256(server.salt + pw))
     v = pow(client_g, x, client_N)
     vu = pow(v, server.u, client_N)
@@ -1297,6 +1290,7 @@ class Tests(unittest.TestCase):
       self.assertTrue(pt == new_msg)
 
   def test_ctr_break_edit(self):
+    '''Break "random access read/write" AES CTR '''
     '''https://cryptopals.com/sets/4/challenges/25'''
 
     key = random_bytes(16)
@@ -1313,6 +1307,7 @@ class Tests(unittest.TestCase):
   # MT19937 {{{
   def test_mt19937(self):
     '''https://cryptopals.com/sets/3/challenges/21'''
+
     mt1, mt2 = MT19937(), MT19937()
 
     seed = randint(0, 100)
@@ -1324,7 +1319,9 @@ class Tests(unittest.TestCase):
       self.assertTrue(mt1.extract_number() == mt2.extract_number())
 
   def test_mt19937_crack(self):
+    '''Crack an MT19937 seed '''
     '''https://cryptopals.com/sets/3/challenges/22'''
+
     seed1 = randint(40, 1000)
     first = MT19937(seed1).extract_number()
 
@@ -1335,6 +1332,7 @@ class Tests(unittest.TestCase):
     self.assertTrue(seed2 == seed1)
 
   def test_mt19937_clone(self):
+    '''Clone an MT19937 RNG from its output '''
     '''https://cryptopals.com/sets/3/challenges/23'''
 
     for _ in xrange(100):
@@ -1364,6 +1362,7 @@ class Tests(unittest.TestCase):
       self.assertTrue(pt == msg)
 
   def test_mt19937_break(self):
+    '''Break an MT19937 stream cipher '''
     '''https://cryptopals.com/sets/3/challenges/24'''
 
     # break PRNG stream cipher (recover key (16-bit seed)
@@ -1444,6 +1443,8 @@ class Tests(unittest.TestCase):
 
   # Diffie-Hellman {{{
   def test_dh(self):
+    '''https://cryptopals.com/sets/5/challenges/33'''
+
     A = DH_Peer(p, g)
     B = DH_Peer(p, g)
 
@@ -1510,17 +1511,17 @@ class Tests(unittest.TestCase):
 
   # SRP {{{
   def test_srp_normal(self):
-    server, client = srp_normal()
+    '''https://cryptopals.com/sets/5/challenges/36'''
 
+    server, client = srp_normal()
     self.assertTrue(server.check_mac(client.sign_salt()) == True)
 
   def test_srp_bypass(self):
+    '''client sends 0 as its pubkey (or N, N*2, etc.) '''
     '''https://cryptopals.com/sets/5/challenges/37'''
-    '''client sends 0 as its pubkey (or N, N*2, etc.)'''
 
     for fake_pubkey in [0, p, p*2]:
       server, client = srp_bypass(fake_pubkey)
-
       self.assertTrue(server.check_mac(client.sign_salt()) == True)
 
       # both sides now have
@@ -1528,8 +1529,8 @@ class Tests(unittest.TestCase):
       self.assertTrue(client.K == sha256('0'))
 
   def test_srp_mitm(self):
-  '''https://cryptopals.com/sets/5/challenges/38'''
-  '''mitm can crack client's password offline'''
+    '''mitm can crack client's password offline '''
+    '''https://cryptopals.com/sets/5/challenges/38'''
 
     server, client = srp_mitm()
     mac = client.sign_salt()
