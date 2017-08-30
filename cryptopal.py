@@ -18,9 +18,9 @@ __license__ = 'GPLv2'
 
 from collections import Counter, defaultdict
 from Crypto.Cipher import AES
-from Crypto.Util.number import long_to_bytes, bytes_to_long
+from Crypto.Util.number import long_to_bytes, bytes_to_long, getPrime as get_prime
+from Crypto.PublicKey.RSA import inverse
 from random import randint, shuffle
-import random
 import itertools
 import hashlib
 import hmac
@@ -31,8 +31,28 @@ import struct
 import logging
 import string
 import requests
+from requests.packages.urllib3.exceptions import InsecureRequestWarning
+requests.packages.urllib3.disable_warnings(InsecureRequestWarning)
+from operator import mul
+from urllib import unquote
 
 # Utils {{{
+def b64d(s):
+  '''Lenient base64 decode'''
+
+  if '%' in s:
+    s = unquote(s)
+
+  if '_' in s or '-' in s:
+    s = s.replace('_', '/')
+    s = s.replace('-', '+')
+
+  l = len(s) % 4
+  if l != 0:
+    s += '='* (4 - l)
+
+  return s.decode('base64')
+
 def base36encode(number):
     if not isinstance(number, (int, long)):
         raise TypeError('number must be an integer')
@@ -105,8 +125,7 @@ def pairwise(iterable):
     return zip(a, b)
 
 def score_english(msg):
-  english = "etaonrishd .,\nlfcmugypwbvkjxqz-_!?'\"/1234567890*";
-  #english = ' etaoinshrdlcumwfgypbvkjxqz'
+  english = "etaonrishd .,\nlfcmugypwbvkjxqz-_!?'\"/1234567890*"
 
   stats = Counter(filter(lambda c: c.lower() in english, msg))
   score = 0
@@ -142,9 +161,9 @@ def bitflip(ciphertext, oracle):
       yield i, oracle(payload)
 
 def bitflipall(ciphertext, oracle):
-  '''Test all values in a byte
+  '''Test all possible values in a byte
   ctext: 01001001
-  flips: 00000000
+  tests: 00000000
          00000001
          00000010
          11111111 (255)
@@ -224,8 +243,8 @@ def find_xor_key(ciphertext, keysize):
 
 # ECB {{{
 def detect_ecb(ciphertext):
-  '''https://cryptopals.com/sets/1/challenges/8'''
-  for bs in [16, 32, 8, 12, 24]:
+  '''counts identical blocks'''
+  for bs in [32, 24, 16, 12, 8]:
     blocks = chunk(ciphertext, bs)
     stats = Counter(blocks)
     
@@ -237,7 +256,7 @@ def detect_ecb(ciphertext):
 
 def detect_ecb2(ciphertext):
   '''using defaultdict instead of Counter'''
-  for bs in [16, 32, 8, 12, 24]:
+  for bs in [32, 24, 16, 12, 8]:
     blocks = chunk(ciphertext, bs)
     stats = defaultdict(lambda: 1)
 
@@ -382,7 +401,7 @@ def decrypt_cbc(msg, key, iv=None):
 # }}}
 
 # Padding Oracle {{{
-class PaddingOracle:
+class PaddingOracle(object):
   '''Added multithreading to https://github.com/mwielgoszewski/python-paddingoracle'''
 
   def __init__(self, max_retries=5):
@@ -421,7 +440,7 @@ class PaddingOracle:
 
     return encrypted
 
-  def decrypt(self, ciphertext, block_size):
+  def decrypt(self, ciphertext, block_size, multithread=True):
     '''Decrypt each block in a thread'''
 
     decrypted = {}
@@ -429,13 +448,17 @@ class PaddingOracle:
     self.resultq = Queue()
 
     for block in blocks[1:]:
-      t = Thread(target=self.bust, args=(block, block_size))
-      t.daemon = True
-      t.start()
+      if multithread:
+        t = Thread(target=self.bust, args=(block, block_size))
+        t.daemon = True
+        t.start()
+      else:
+        self.bust(block, block_size)
 
     try:
       while True:
         block, inter = self.pop_result()
+        logging.debug('block: %r, inter: %r' % (block, inter))
         idx = blocks.index(block)
         decrypted[idx] = xor(inter, blocks[idx - 1])
 
@@ -1048,6 +1071,109 @@ def srp_crack_password(server, client_g, client_N, client_pubkey, mac):
 
 # }}}
 
+# RSA {{{
+def bitlen_of(x):
+  return len(bin(x)[2:])
+
+def bytelen_of(x):
+  return bitlen_of(x) // 8
+
+def egcd(a, b):
+  if b == 0:
+    return (1, 0)
+
+  assert a > 0 and b > 0
+
+  q, r = divmod(a, b)
+  s, t = egcd(b, r)
+
+  return t, s - q * t
+
+def invmod(x, y):
+  return inverse(x, y)
+
+def _invmod(x, y):
+  ax, by = egcd(x, y)
+  while ax < 0:
+    ax += y
+  return ax
+
+def gen_prime_given_e(bitlen, e):
+  while True:
+    p = get_prime(bitlen)
+    if p % e != 1:
+      return p
+
+def keygen_rsa(bitlen, e):
+  assert bitlen % 2 == 0
+  pqlen = bitlen // 2
+
+  while True:
+    p = gen_prime_given_e(pqlen, e)
+    q = gen_prime_given_e(pqlen, e)
+    n = p * q
+
+    phi = (p - 1) * (q - 1)
+
+    d = invmod(e, phi)
+    if bitlen_of(n) == bitlen and (d * e) % phi == 1:
+      return (n, e), (n, d)
+
+def encrypt_rsa(pubkey, msg):
+    n, e = pubkey
+    return pow(msg, e, n)
+
+def decrypt_rsa(privkey, msg):
+    n, d = privkey
+    return pow(msg, d, n)
+
+def rsa_broadcast_attack(pairs, exponent=3):
+  from gmpy2 import iroot
+
+  ns = [n for n, c in pairs]
+  cs = [c for n, c in pairs]
+
+  N = reduce(mul, ns)
+
+  ms = []
+  for n in ns:
+    ms.append(N // n)
+
+  res = 0
+  for c, m, n in zip(cs, ms, ns):
+    res += c * m * inverse(m, n)
+
+  res %= N
+
+  rec, _ = iroot(res, exponent)
+
+  return long_to_bytes(rec)
+
+def rsa_unpadded_message_attack(ct, modulus, exponent=3):
+  from gmpy2 import iroot
+
+  while True:
+    rec, e = iroot(ct, exponent)
+    if e:
+      break
+
+    ct += modulus
+
+  return long_to_bytes(rec)
+
+def rsa_unpadded_decryption_oracle(decryption_oracle, pubkey, ct):
+
+  N, e = pubkey
+
+  pt2 = 42 # random.randrange(1, N)
+  ct2 = encrypt_rsa(pubkey, pt2)
+  pt3 = decryption_oracle((ct2 * ct) % N)
+
+  pt = (pt3 * invmod(pt2, N)) % N
+  return long_to_bytes(pt)
+
+# }}}
+
 # Unit Tests {{{
 import unittest
 class Tests(unittest.TestCase):
@@ -1066,6 +1192,7 @@ class Tests(unittest.TestCase):
         new = padded[-pad:] + chr(pad + 1) * pad
         with self.assertRaises(PaddingException):
           pkcs7unpad(new)
+
   # }}}
 
   # XOR {{{
@@ -1086,6 +1213,7 @@ class Tests(unittest.TestCase):
       found_key = find_xor_key(ciphertext, found_keysize)
 
       self.assertTrue(xor(ciphertext, found_key) == plaintext)
+
   # }}}
 
   # ECB {{{
@@ -1165,6 +1293,7 @@ class Tests(unittest.TestCase):
         decrypted = decrypt_suffix(encryption_oracle)
 
         self.assertTrue(decrypted == sfx)
+
   # }}}
 
   # CBC {{{
@@ -1255,6 +1384,7 @@ class Tests(unittest.TestCase):
       ct = encrypt_cbc(pkcs7pad(msg, AES.block_size), key, random_bytes(AES.block_size))
       pt = padbuster.decrypt(ct, AES.block_size)
       self.assertTrue(pkcs7unpad(pt) == msg)
+
   # }}}
 
   # CTR {{{
@@ -1400,6 +1530,7 @@ class Tests(unittest.TestCase):
         best_seed = seed
 
     self.assertTrue(best_seed == secret_seed)
+
   # }}}
 
   # Hash Length Extension {{{
@@ -1439,6 +1570,7 @@ class Tests(unittest.TestCase):
           forged_mac = sha.hexdigest()
 
           self.assertTrue(check_mac(forged_msg, forged_mac))
+
   # }}}
 
   # Diffie-Hellman {{{
@@ -1507,6 +1639,7 @@ class Tests(unittest.TestCase):
 
     self.assertTrue((A.sharedkey == derivekey(p - 1) and B.sharedkey == derivekey(p - 1)) or (A.sharedkey == derivekey(1) and B.sharedkey == derivekey(1)))
     self.assertTrue(is_mitm(A, B, M))
+
   # }}}
 
   # SRP {{{
@@ -1537,6 +1670,105 @@ class Tests(unittest.TestCase):
     found = srp_crack_password(server, client.g, client.N, client.pubkey, mac)
 
     self.assertTrue(found == client.password)
+
+  # }}}
+
+  # RSA {{{
+  def test_rsa_encryptdecrypt(self):
+    for key_size in [1024, 2048]: # bigger key sizes take forever
+      for msg_size in range(1, 50):
+        pubkey, privkey = keygen_rsa(key_size, 0x10001)
+
+        pt = bytes_to_long(random_bytes(msg_size))
+        ct = encrypt_rsa(pubkey, pt)
+
+        self.assertTrue(decrypt_rsa(privkey, ct) == pt)
+
+  def test_rsa_broadcast(self):
+    '''standard E=3 RSA broadcast attack with plaintext smaller than any modulus '''
+    '''https://cryptopals.com/sets/5/challenges/40'''
+
+    exponent = 3
+    msg = 'this is a secret message'
+
+    pairs = []
+    for _ in range(3):
+      (n, e), _ = keygen_rsa(1024, exponent)
+      ct = encrypt_rsa((n, e), bytes_to_long(msg))
+
+      pairs.append((n, ct))
+
+    rec = rsa_broadcast_attack(pairs)
+    self.assertTrue(rec == msg)
+
+  def test_rsa_broadcast_icectf(self):
+    '''Special case where a standard broadcast attack will not work because plaintext is bigger than any of the provided modulus. '''
+    '''Every individual RSA encryption loses some information, but when enough pubkeys and ciphertexts are gathered, the plaintext can be "magically" recovered. '''
+    '''http://blog.atx.name/icectf/#Agents'''
+
+    exponent = 3
+    ns = []
+
+    for _ in range(200):
+      (n, e), _ = keygen_rsa(1024, exponent)
+      ns.append(n)
+
+    # making sure msg is bigger than the biggest modulus
+    msg = 'the secret msg is '
+    while not bytes_to_long(msg) > max(ns):
+      msg += random_chars(1)
+    msg += random_chars(1000)
+
+    pairs = []
+    for n in ns:
+      ct = encrypt_rsa((n, exponent), bytes_to_long(msg))
+      pairs.append((n, ct))
+
+    rec = rsa_broadcast_attack(pairs)
+    self.assertTrue(rec == msg)
+
+  def test_rsa_unpadded_message_attack(self):
+    '''small message and small exponent '''
+    '''http://blog.atx.name/icectf/#RSA3'''
+    exponent = 3
+    msg = 'this is the secret message'
+
+    pt = bytes_to_long(msg)
+
+    (n, e), _ = keygen_rsa(1024, exponent)
+    ct = encrypt_rsa((n, e), pt)
+
+    self.assertTrue(pt < n) # msg must be smaller than modulus
+
+    rec = rsa_unpadded_message_attack(ct, n, exponent)
+    self.assertTrue(rec == msg)
+
+  def test_rsa_unpadded_decryption_oracle(self):
+    '''https://cryptopals.com/sets/6/challenges/41'''
+
+    ciphers = []
+    def decrypt_once(ct):
+      '''the decryption oracle'''
+      if ct in ciphers:
+        return None
+
+      ciphers.append(ct)
+      return decrypt_rsa(privkey, ct)
+
+    pubkey, privkey = keygen_rsa(1024, 3)
+
+    msg = 'this is a secret message'
+    pt = bytes_to_long(msg)
+
+    assert pt < pubkey[0] # msg must be smaller than modulus
+
+    ct = encrypt_rsa(pubkey, pt)
+
+    assert decrypt_once(ct) == pt
+    assert decrypt_once(ct) is None
+
+    rec = rsa_unpadded_decryption_oracle(decrypt_once, pubkey, ct)
+    self.assertTrue(rec == msg)
 
   # }}}
 
