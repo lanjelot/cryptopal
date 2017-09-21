@@ -125,8 +125,7 @@ def pairwise(iterable):
     next(b, None)
     return zip(a, b)
 
-def score_english(msg):
-  english = "etaonrishd .,\nlfcmugypwbvkjxqz-_!?'\"/1234567890*"
+def score_english(msg, english="etaonrishd .,\nlfcmugypwbvkjxqz-_!?'\"/1234567890*"):
 
   stats = Counter(filter(lambda c: c.lower() in english, msg))
   score = 0
@@ -239,6 +238,49 @@ def find_xor_key(ciphertext, keysize):
     key += crack_single_char_xor(chars)
 
   return key
+
+def break_xor_contains_key(ciphertext, plaintext_prefix):
+  '''Recover xor key when plaintext contains it.  Given ciphertext must end with the key
+and plaintext_prefix must be some known text that the plaintext starts with.
+Based on https://teamrocketist.github.io/2017/09/18/Crypto-CSAW-CTF-2017-Another-Xor/
+  '''
+
+  key_prefix = xor(plaintext_prefix, ciphertext)
+
+  def guess_key_offset():
+    '''find where key may start in plaintext'''
+    possible = []
+
+    for i in range(len(plaintext_prefix), len(ciphertext)):
+      s = xor(ciphertext[i:i+len(plaintext_prefix)], key_prefix)
+
+      score, _ = score_english(s, english='etaonrishd .,lfcmugypwbvkjxqz-')
+      possible.append([i, score, s])
+
+    possible = sorted(possible, key=lambda x: x[1], reverse=True)[:5]
+    possible = sorted(possible, key=lambda x: x[0])
+
+    return possible
+
+  for key_offset, _, _ in guess_key_offset():
+    key_len = len(ciphertext) - key_offset
+    key = key_prefix.ljust(key_len, '\x00')
+
+    while True:
+      plaintext = ''
+      for i in range(len(ciphertext)):
+        if key[i % key_len] != '\x00':
+          plaintext += xor(ciphertext[i], key[i % key_len])
+        else:
+          plaintext += '\x00'
+
+      new_key = key_prefix + plaintext[key_offset+len(key_prefix):key_offset+key_len]
+      if new_key == key:
+        break
+
+      key = new_key
+      if '\x00' not in key:
+        yield key
 
 # }}}
 
@@ -1073,11 +1115,12 @@ def srp_crack_password(server, client_g, client_N, client_pubkey, mac):
 # }}}
 
 # RSA {{{
-def bitlen_of(x):
-  return len(bin(x)[2:])
+def bit_length(x):
+  return x.bit_length()
+  #return len(bin(x)[2:])
 
-def bytelen_of(x):
-  return bitlen_of(x) // 8
+def byte_length(x):
+  return bit_length(x) // 8
 
 def egcd(a, b):
   if b == 0:
@@ -1117,7 +1160,7 @@ def keygen_rsa(bitlen, e):
     phi = (p - 1) * (q - 1)
 
     d = invmod(e, phi)
-    if bitlen_of(n) == bitlen and (d * e) % phi == 1:
+    if bit_length(n) == bitlen and (d * e) % phi == 1:
       return (n, e), (n, d)
 
 def encrypt_rsa(pubkey, msg):
@@ -1243,6 +1286,19 @@ class Tests(unittest.TestCase):
       found_key = find_xor_key(ciphertext, found_keysize)
 
       self.assertTrue(xor(ciphertext, found_key) == plaintext)
+
+  def test_break_xor_contains_key(self):
+    key = 'A quart jar of oil mixed with zinc oxide makes a very bright paint|'
+
+    for size in range(5, len(key) - 5):
+      plaintext = random_chars(size, '0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ!"#$%&\'()*+,-./:;<=>?@[\\]^_`{|}~ ') + key
+      ciphertext = xor(plaintext, key)
+
+      for k in break_xor_contains_key(ciphertext, plaintext[:5]):
+        if xor(ciphertext, k) == plaintext:
+          break
+      else:
+        self.fail()
 
   # }}}
 
