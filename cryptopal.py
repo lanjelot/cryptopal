@@ -220,10 +220,10 @@ def transpose(text, size):
 
   for i in range(size):
     chars = ''
+
     for block in chunk(text, size):
       if i >= len(block):
         break
-
       chars += block[i]
 
     transposed.append(chars)
@@ -240,7 +240,7 @@ def find_xor_key(ciphertext, keysize):
   return key
 
 def break_xor_contains_key(ciphertext, plaintext_prefix):
-  '''Recover xor key when plaintext contains it.  Given ciphertext must end with the key
+  '''Recover xor key when plaintext contains it. Given ciphertext must end with the key
 and plaintext_prefix must be some known text that the plaintext starts with.
 Based on https://teamrocketist.github.io/2017/09/18/Crypto-CSAW-CTF-2017-Another-Xor/
   '''
@@ -1504,6 +1504,43 @@ class Tests(unittest.TestCase):
       new_msg = msg[:offset] + newtext + msg[offset + newtext_size:]
 
       self.assertTrue(pt == new_msg)
+
+  def test_ctr_break_fixed_nonce(self):
+    '''Break fixed-nonce CTR mode '''
+    '''https://cryptopals.com/sets/3/challenges/20'''
+
+    lines = plaintext.split('\n')
+
+    plaintexts = []
+    for i in range(len(lines) * 10):
+
+      line = lines[i % len(lines)]
+      offset = i / len(lines)
+
+      pt = line[offset:]
+      plaintexts.append(pt)
+
+    ciphertexts = []
+    for pt in plaintexts:
+      ct = CTRCipher('YELLOW SUBMARINE', 0).encrypt(pt)
+      ciphertexts.append(ct)
+
+    min_len = min(map(len, ciphertexts))
+    max_len = max(map(len, ciphertexts))
+
+    transposed = transpose(''.join(c.ljust(max_len, '\x00') for c in ciphertexts), max_len)
+
+    key = ''
+    for chars in transposed:
+      best_char = crack_single_char_xor(chars)
+      key += best_char
+
+    for i in range(len(lines)):
+      recovered = xor(ciphertexts[i], key)
+      plaintext = plaintexts[i]
+
+      if recovered[:min_len] != plaintext[:min_len]:
+        self.fail()
 
   def test_ctr_break_edit(self):
     '''Break "random access read/write" AES CTR '''
