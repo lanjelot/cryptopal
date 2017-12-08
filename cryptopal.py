@@ -20,7 +20,7 @@ from collections import Counter, defaultdict
 from Crypto.Cipher import AES
 from Crypto.Util.number import long_to_bytes, bytes_to_long, getPrime as get_prime
 from Crypto.PublicKey.RSA import inverse
-from random import randint, shuffle
+from random import randint, shuffle, randrange
 import itertools
 import hashlib
 import hmac
@@ -97,6 +97,9 @@ def _long_to_bytes(n):
   s = '%x' % n
   s = s if len(s) % 2 == 0 else '0' + s
   return s.decode('hex')
+
+def _bytes_to_long(s):
+  return long(s.encode('hex'), 16)
 
 def pkcs7pad(s, bs):
   pad = bs - (len(s) % bs)
@@ -886,11 +889,14 @@ def break_hmac():
 # }}}
 
 # Diffie-Hellman {{{
-def keygen_dh(p, g):
-    privkey = bytes_to_long(random_bytes(16)) % p
-    pubkey = pow(g, privkey, p)
+def params_dh(p=0xffffffffffffffffc90fdaa22168c234c4c6628b80dc1cd129024e088a67cc74020bbea63b139b22514a08798e3404ddef9519b3cd3a431b302b0a6df25f14374fe1356d6d51c245e485b576625e7ec6f44c42e9a637ed6b0bff5cb6f406b7edee386bfb5a899fa5ae9f24117c4b1fe649286651ece45b3dc2007cb8a163bf0598da48361c55d39a69163fa8fd24cf5f83655d23dca3ad961c62f356208552bb9ed529077096966d670c354e4abc9804f1746c08ca237327ffffffffffffffff, g=2):
+  return p, g
 
-    return privkey, pubkey
+def keygen_dh(p, g):
+  privkey = bytes_to_long(random_bytes(16)) % p
+  pubkey = pow(g, privkey, p)
+
+  return privkey, pubkey
 
 def derivekey(s):
     return hashlib.sha1('%x' % s).digest()[:16]
@@ -1122,25 +1128,23 @@ def bit_length(x):
 def byte_length(x):
   return bit_length(x) // 8
 
-def egcd(a, b):
-  if b == 0:
-    return (1, 0)
+def egcd(b, n):
+  '''Iterative algorithm https://en.wikibooks.org/wiki/Algorithm_Implementation/Mathematics/Extended_Euclidean_algorithm'''
+  x0, x1, y0, y1 = 1, 0, 0, 1
+  while n != 0:
+      q, b, n = b // n, n, b % n
+      x0, x1 = x1, x0 - q * x1
+      y0, y1 = y1, y0 - q * y1
+  return  b, x0, y0
 
-  assert a > 0 and b > 0
+def invmod(b, n):
+  return inverse(b, n)
 
-  q, r = divmod(a, b)
-  s, t = egcd(b, r)
-
-  return t, s - q * t
-
-def invmod(x, y):
-  return inverse(x, y)
-
-def _invmod(x, y):
-  ax, by = egcd(x, y)
-  while ax < 0:
-    ax += y
-  return ax
+def _invmod(b, n):
+  '''Modular inverse https://en.wikibooks.org/wiki/Algorithm_Implementation/Mathematics/Extended_Euclidean_algorithm'''
+  g, x, _ = egcd(b, n)
+  if g == 1:
+    return x % n
 
 def gen_prime_given_e(bitlen, e):
   while True:
@@ -1161,15 +1165,15 @@ def keygen_rsa(bitlen, e):
 
     d = invmod(e, phi)
     if bit_length(n) == bitlen and (d * e) % phi == 1:
-      return (n, e), (n, d)
+      return (n, d), (n, e)
 
 def encrypt_rsa(pubkey, msg):
-    n, e = pubkey
-    return pow(msg, e, n)
+  n, e = pubkey
+  return pow(msg, e, n)
 
 def decrypt_rsa(privkey, msg):
-    n, d = privkey
-    return pow(msg, d, n)
+  n, d = privkey
+  return pow(msg, d, n)
 
 def rsa_broadcast_attack(pairs, exponent=3):
   ns = [n for n, c in pairs]
@@ -1244,6 +1248,76 @@ def rsa_bleichenbacher_e3_signature_forgery_easy(msg, modulus_size=1024):
 
     if '\x00' not in long_to_bytes(bytes_to_long(sig) ** 3)[:-len(suffix)]:
       return sig
+
+# }}}
+
+# DSA {{{
+def params_dsa(p=0x800000000000000089e1855218a0e7dac38136ffafa72eda7859f2171e25e65eac698c1702578b07dc2a1076da241c76c62d374d8389ea5aeffd3226a0530cc565f3bf6b50929139ebeac04f48c3c84afb796d61e5a4f9a8fda812ab59494232c7d2b4deb50aa18ee9e132bfa85ac4374d7f9091abc3d015efc871a584471bb1, q=0xf4f47f05794b256174bba6e9b396a7707e563c5b, g=0x5958c9d3898b224b12672c0b98e06c60df923cb8bc999d119458fef538b8fa4046c8db53039db620c094c9fa077ef389b5322a559946a71903f990f1f7e0e025e2d7f7cf494aff1a0470f5b64c36b625a097f1651fe775323556fe00b3608c887892878480e99041be601a62166ca6894bdd41a7054ec89f756ba9fc95302291):
+  return p, q, g
+
+def keygen_dsa(p=None, q=None, g=None):
+  if p is None or q is None or g is None:
+    p, q, g = params_dsa()
+
+  x = randint(1, q - 1)
+  y = pow(g, x, p)
+
+  privkey, pubkey = ((p, q, g), x), ((p, q, g), y)
+  return privkey, pubkey
+
+def hash_dsa(s):
+  return bytes_to_long(hashlib.sha1(s).digest())
+
+def sign_dsa(msg, privkey, safe=True):
+  (p, q, g), x = privkey
+
+  while True:
+    k = randrange(1, q - 1)
+    r = pow(g, k, p) % q
+    if r == 0 and safe:
+      continue
+
+    kinv = invmod(k, q)
+    h = hash_dsa(msg)
+    s = (kinv * (h + x * r)) % q
+    if s == 0 and safe:
+      continue
+
+    return r, s
+
+def verify_dsa(msg, sig, pubkey, safe=True):
+  (p, q, g), y = pubkey
+  r, s = sig
+
+  if safe:
+    if not (0 < r and r < q):
+      return False
+
+    if not (0 < s and s < q):
+      return False
+
+  w = invmod(s, q)
+  h = hash_dsa(msg)
+  u1 = (h * w) % q
+  u2 = (r * w) % q
+
+  v = ((pow(g, u1, p) * pow(y, u2, p)) % p) % q
+  return v == r
+
+def recover_dsa_key(q, k, sig, msg):
+  '''given known k, recover DSA private key x'''
+  r, s = sig
+  rinv = invmod(r, q)
+  h = hash_dsa(msg)
+  x = ((s * k - h) * rinv) % q
+  return x
+
+def recover_dsa_repeated_k(q, msg1, sig1, msg2, sig2):
+  r1, s1 = sig1
+  r2, s2 = sig2
+
+  k = (hash_dsa(msg1) - hash_dsa(msg2)) * invmod((s1 - s2), q)
+  return k
 
 # }}}
 
@@ -1537,9 +1611,9 @@ class Tests(unittest.TestCase):
 
     for i in range(len(lines)):
       recovered = xor(ciphertexts[i], key)
-      plaintext = plaintexts[i]
+      pt = plaintexts[i]
 
-      if recovered[:min_len] != plaintext[:min_len]:
+      if recovered[:min_len] != pt[:min_len]:
         self.fail()
 
   def test_ctr_break_edit(self):
@@ -1555,7 +1629,7 @@ class Tests(unittest.TestCase):
     recovered = ctr.edit(ciphertext, 0, ciphertext)
     self.assertTrue(plaintext == recovered)
 
-  # }}}
+ # }}}
 
   # MT19937 {{{
   def test_mt19937(self):
@@ -1699,6 +1773,7 @@ class Tests(unittest.TestCase):
   # Diffie-Hellman {{{
   def test_dh(self):
     '''https://cryptopals.com/sets/5/challenges/33'''
+    p, g = params_dh()
 
     A = DH_Peer(p, g)
     B = DH_Peer(p, g)
@@ -1720,6 +1795,7 @@ class Tests(unittest.TestCase):
   def test_dh_mitm_p(self):
     '''mitm via sending p as A.pubkey and B.pubkey '''
     '''https://cryptopals.com/sets/5/challenges/34'''
+    p, g = params_dh()
 
     A, B, M = mitm_dh_p(p, g)
 
@@ -1730,6 +1806,7 @@ class Tests(unittest.TestCase):
   def test_dh_mitm_fakeg(self):
     '''mitm via malicious g '''
     '''https://cryptopals.com/sets/5/challenges/35'''
+    p, g = params_dh()
 
     # g = p
     # pubkey will always be 0 whatever privkey is
@@ -1776,6 +1853,8 @@ class Tests(unittest.TestCase):
     '''client sends 0 as its pubkey (or N, N*2, etc.) '''
     '''https://cryptopals.com/sets/5/challenges/37'''
 
+    p, _ = params_dh()
+
     for fake_pubkey in [0, p, p*2]:
       server, client = srp_bypass(fake_pubkey)
       self.assertTrue(server.check_mac(client.sign_salt()) == True)
@@ -1800,7 +1879,7 @@ class Tests(unittest.TestCase):
   def test_rsa_encryptdecrypt(self):
     for key_size in [1024, 2048]: # bigger key sizes take forever
       for msg_size in range(1, 50):
-        pubkey, privkey = keygen_rsa(key_size, 0x10001)
+        privkey, pubkey = keygen_rsa(key_size, 0x10001)
 
         pt = bytes_to_long(random_bytes(msg_size))
         ct = encrypt_rsa(pubkey, pt)
@@ -1816,7 +1895,7 @@ class Tests(unittest.TestCase):
 
     pairs = []
     for _ in range(3):
-      (n, e), _ = keygen_rsa(1024, exponent)
+      _, (n, e) = keygen_rsa(1024, exponent)
       ct = encrypt_rsa((n, e), bytes_to_long(msg))
 
       pairs.append((n, ct))
@@ -1833,7 +1912,7 @@ class Tests(unittest.TestCase):
     ns = []
 
     for _ in range(200):
-      (n, e), _ = keygen_rsa(1024, exponent)
+      _, (n, e) = keygen_rsa(1024, exponent)
       ns.append(n)
 
     # making sure msg is bigger than the biggest modulus
@@ -1858,7 +1937,7 @@ class Tests(unittest.TestCase):
 
     pt = bytes_to_long(msg)
 
-    (n, e), _ = keygen_rsa(1024, exponent)
+    _, (n, e) = keygen_rsa(1024, exponent)
     ct = encrypt_rsa((n, e), pt)
 
     self.assertTrue(pt < n) # msg must be smaller than modulus
@@ -1878,7 +1957,7 @@ class Tests(unittest.TestCase):
       ciphers.append(ct)
       return decrypt_rsa(privkey, ct)
 
-    pubkey, privkey = keygen_rsa(1024, 3)
+    privkey, pubkey = keygen_rsa(1024, 3)
 
     msg = 'this is a secret message'
     pt = bytes_to_long(msg)
@@ -1915,7 +1994,7 @@ class Tests(unittest.TestCase):
     modlen = 1024 / 8
 
     for msg_size in range(50):
-      _, (n, d) = keygen_rsa(1024, 3)
+      (n, d), _ = keygen_rsa(1024, 3)
       msg = random_chars(msg_size)
 
       sig_legit = pkcs1_sign(msg)
@@ -1952,13 +2031,130 @@ class Tests(unittest.TestCase):
 
   # }}}
 
+  # DSA {{{
+  def test_dsa_sign_verify(self):
+    for msg_size in range(1, 50):
+      privkey, pubkey = keygen_dsa()
+
+      msg = random_bytes(msg_size)
+      sig = sign_dsa(msg, privkey)
+
+      self.assertTrue(verify_dsa(msg, sig, pubkey))
+
+  def test_dsa_recover_key_brute(self):
+    '''https://cryptopals.com/sets/6/challenges/43'''
+
+    msg = '''For those that envy a MC it can be hazardous to your health
+So be friendly, a matter of life and death, just like a etch-a-sketch
+'''
+    self.assertEquals(hash_dsa(msg), 0xd2d0714f014a9784047eaeccf956520045c45265)
+
+    y = 0x84ad4719d044495496a3201c8ff484feb45b962e7302e56a392aee4abab3e4bdebf2955b4736012f21a08084056b19bcd7fee56048e004e44984e2f411788efdc837a0d2e5abb7b555039fd243ac01f0fb2ed1dec568280ce678e931868d23eb095fde9d3779191b8c0299d6e07bbb283e6633451e535c45513b2d33c99ea17
+    r = 548099063082341131477253921760299949438196259240
+    s = 857042759984254168557880549501802188789837994940
+
+    p, q, g = params_dsa()
+    sig = r, s
+
+    self.assertTrue(verify_dsa(msg, sig, ((p, q, g), y)))
+
+    for k in range(0, 2**16):
+      x = recover_dsa_key(q, k, sig, msg)
+      if pow(g, x, p) == y and hash_dsa('%x' % x) == 0x0954edd5e0afe5542a4adf012611a91912a3ec16:
+        break
+    else:
+      self.fail()
+
+  def test_dsa_recovery_repeated_nonce(self):
+    '''https://cryptopals.com/sets/6/challenges/44'''
+    p, q, g = params_dsa()
+
+    y = 0x2d026f4bf30195ede3a088da85e398ef869611d0f68f0713d51c9c1a3a26c95105d915e2d8cdf26d056b86b8a7b85519b1c23cc3ecdc6062650462e3063bd179c2a6581519f674a61f1d89a1fff27171ebc1b93d4dc57bceb7ae2430f98a6a4d83d8279ee65d71c1203d2c96d65ebbf7cce9d32971c3de5084cce04a2e147821
+
+    messages = [
+      ('Listen for me, you better listen for me now. ', 0xa4db3de27e2db3e5ef085ced2bced91b82e0df19,
+        (1105520928110492191417703162650245113664610474875, 1267396447369736888040262262183731677867615804316)),
+      ('Listen for me, you better listen for me now. ', 0xa4db3de27e2db3e5ef085ced2bced91b82e0df19,
+        (51241962016175933742870323080382366896234169532, 29097472083055673620219739525237952924429516683)),
+      ('When me rockin\' the microphone me rock on steady, ', 0x21194f72fe39a80c9c20689b8cf6ce9b0e7e52d4,
+        (228998983350752111397582948403934722619745721541, 277954141006005142760672187124679727147013405915)),
+      ('Yes a Daddy me Snow me are de article dan. ', 0x1d7aaaa05d2dee2f7dabdc6fa70b6ddab9c051c5,
+        (1099349585689717635654222811555852075108857446485, 1013310051748123261520038320957902085950122277350)),
+      ('But in a in an\' a out de dance em ', 0x6bc188db6e9e6c7d796f7fdd7fa411776d7a9ff,
+        (425320991325990345751346113277224109611205133736, 203941148183364719753516612269608665183595279549)),
+      ('Aye say where you come from a, ', 0x5ff4d4e8be2f8aae8a5bfaabf7408bd7628f43c9,
+        (486260321619055468276539425880393574698069264007, 502033987625712840101435170279955665681605114553)),
+      ('People em say ya come from Jamaica, ', 0x7d9abd18bbecdaa93650ecc4da1b9fcae911412,
+        (537050122560927032962561247064393639163940220795, 1133410958677785175751131958546453870649059955513)),
+      ('But me born an\' raised in the ghetto that I want yas to know, ', 0x88b9e184393408b133efef59fcef85576d69e249,
+        (826843595826780327326695197394862356805575316699, 559339368782867010304266546527989050544914568162)),
+      ('Pure black people mon is all I mon know. ', 0xd22804c4899b522b23eda34d2137cd8cc22b9ce8,
+        (1105520928110492191417703162650245113664610474875, 1021643638653719618255840562522049391608552714967)),
+      ('Yeah me shoes a an tear up an\' now me toes is a show a ', 0xbc7ec371d951977cba10381da08fe934dea80314,
+        (51241962016175933742870323080382366896234169532, 506591325247687166499867321330657300306462367256)),
+      ('Where me a born in are de one Toronto, so ', 0xd6340bfcda59b6b75b59ca634813d572de800e8f,
+        (228998983350752111397582948403934722619745721541, 458429062067186207052865988429747640462282138703)),
+      ]
+
+    for m in messages:
+      msg, h, sig = m
+
+      self.assertTrue(hash_dsa(msg) == h)
+      self.assertTrue(verify_dsa(msg, sig, ((p, q, g), y)))
+
+    for (m, n) in itertools.combinations(messages, 2):
+      msg1, _, sig1 = m
+      msg2, _, sig2 = n
+
+      r1, _ = sig1
+      r2, _ = sig2
+
+      if r1 != r2:
+        continue
+
+      k = recover_dsa_repeated_k(q, msg1, sig1, msg2, sig2)
+      x1 = recover_dsa_key(q, k, sig1, msg1)
+      x2 = recover_dsa_key(q, k, sig2, msg2)
+      if x1 == x2 and hash_dsa('%x' % x1) == 0xca8f6f7c66fa362d40760d135b763eb8527d3d52:
+        if pow(g, x1, p) == y and pow(g, x2, p) == y:
+          continue
+
+      self.fail()
+
+  def test_dsa_bad_params(self):
+    '''https://cryptopals.com/sets/6/challenges/45'''
+    msg1 = random_chars(32)
+    msg2 = random_chars(32)
+
+    # g = 0
+    p, q, g = params_dsa(g=0)
+    privkey, pubkey = keygen_dsa(p, q, g)
+
+    sig1 = sign_dsa(msg1, privkey, safe=False)
+    sig2 = sign_dsa(msg2, privkey, safe=False)
+
+    self.assertTrue(verify_dsa(msg1, sig2, pubkey, safe=False))
+    self.assertTrue(verify_dsa(msg2, sig1, pubkey, safe=False))
+
+    # g = p + 1
+    p, q, g = params_dsa(p, q, p + 1)
+    privkey, pubkey = keygen_dsa(p, q, g)
+
+    _, y = pubkey
+    z = 2
+    invz = invmod(2, q)
+    r = ((y**z) % p) % q
+    s = (r * invz) % q
+
+    self.assertTrue(verify_dsa(msg1, (r, s), pubkey))
+    self.assertTrue(verify_dsa(msg2, (r, s), pubkey))
+
+# }}}
+
 # }}}
 
 if __name__ == '__main__':
   plaintext = '''In 2071, roughly sixty years after an accident with a hyperspace gateway made the Earth uninhabitable, humanity has colonized most of the rocky planets and moons of the Solar System.\n Amid a rising crime rate, the Inter Solar System Police (ISSP) set up a legalized contract system, in which registered bounty hunters (also referred to as "Cowboys") chase criminals and bring them in alive in return for a reward.\n The series protagonists are bounty hunters working from the spaceship Bebop.\n The original crew are Spike Spiegel, an exiled former hitman of the criminal Red Dragon Syndicate, and his partner Jet Black, a former ISSP officer.\n They are later joined by Faye Valentine, an amnesiac con artist; Edward Wong, an eccentric girl skilled in hacking; and Ein, a genetically-engineered Pembroke Welsh Corgi with human-like intelligence.\n Over the course of the series, the team get involved in disastrous mishaps leaving them out of pocket, while often confronting faces and events from their past: these include Jet's reasons for leaving the ISSP, and Faye's past as a young woman from Earth injured in an accident and cryogenically frozen to save her life'''
-
-  p = 0xffffffffffffffffc90fdaa22168c234c4c6628b80dc1cd129024e088a67cc74020bbea63b139b22514a08798e3404ddef9519b3cd3a431b302b0a6df25f14374fe1356d6d51c245e485b576625e7ec6f44c42e9a637ed6b0bff5cb6f406b7edee386bfb5a899fa5ae9f24117c4b1fe649286651ece45b3dc2007cb8a163bf0598da48361c55d39a69163fa8fd24cf5f83655d23dca3ad961c62f356208552bb9ed529077096966d670c354e4abc9804f1746c08ca237327ffffffffffffffff
-  g = 2
 
   unittest.main()
 
