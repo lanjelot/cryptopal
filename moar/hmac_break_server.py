@@ -1,18 +1,20 @@
-from SimpleHTTPServer import SimpleHTTPRequestHandler
-from BaseHTTPServer import HTTPServer
-from cryptopal import hmac_sha1, insecure_compare
+from http.server import SimpleHTTPRequestHandler
+from http.server import HTTPServer
+from cryptopal import hmac_sha1, insecure_compare, b
 from time import sleep
-from urlparse import urlparse, parse_qs
+from urllib.parse import urlparse, parse_qs
+from binascii import unhexlify
 
 def verify(val, sig):
   key = 'you will never guess my key'
-  return insecure_compare(hmac_sha1(key, val), sig.decode('hex'))
+  return insecure_compare(hmac_sha1(b(key), b(val)), unhexlify(b(sig)))
 
 class MyHTTPRequestHandler(SimpleHTTPRequestHandler):
 
   def do_GET(self):
     query = parse_qs(urlparse(self.path).query)
     filename, signature = query['file'][0], query['signature'][0]
+
     valid = verify(filename, signature)
 
     if not valid:
@@ -27,5 +29,5 @@ class MyHTTPRequestHandler(SimpleHTTPRequestHandler):
 if __name__ == '__main__':
   httpd = HTTPServer(('', 8181), MyHTTPRequestHandler)
   sa = httpd.socket.getsockname()
-  print "Serving HTTP on", sa[0], "port", sa[1], "..."
+  print("Serving HTTP on", sa[0], "port", sa[1], "...")
   httpd.serve_forever()

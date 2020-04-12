@@ -13,12 +13,12 @@ __author__  = 'Sebastien Macke'
 __email__   = 'lanjelot@gmail.com'
 __url__     = 'https://github.com/lanjelot/cryptopal'
 __twitter__ = 'https://twitter.com/lanjelot'
-__version__ = '0.1'
+__version__ = '0.1-beta'
 __license__ = 'GPLv2'
 
 from collections import Counter, defaultdict
-from Crypto.Cipher import AES
-from Crypto.Util.number import long_to_bytes, bytes_to_long, getPrime as get_prime
+from Cryptodome.Cipher import AES
+from Cryptodome.Util.number import getPrime as get_prime
 from Crypto.PublicKey.RSA import inverse
 from random import randint, shuffle, randrange
 import itertools
@@ -26,7 +26,8 @@ import hashlib
 import hmac
 from time import time, sleep
 from threading import Thread
-from Queue import Queue, Empty
+from queue import Queue, Empty
+from urllib.parse import unquote
 import struct
 import logging
 import string
@@ -34,10 +35,33 @@ import requests
 from requests.packages.urllib3.exceptions import InsecureRequestWarning
 requests.packages.urllib3.disable_warnings(InsecureRequestWarning)
 from operator import mul
-from urllib import unquote
+from functools import reduce
+from base64 import b64decode, b64encode
+from binascii import hexlify, unhexlify
 from gmpy2 import iroot
 
 # Utils {{{
+def b(s):
+  if isinstance(s, str):
+    return s.encode('latin1')
+  else:
+    return s
+
+def B(s):
+  if isinstance(s, bytes):
+    return s.decode('latin1')
+  else:
+    return s
+
+def bchr(i):
+  return bytes((i,))
+
+def hex_str(s):
+  return B(hexlify(b(s)))
+
+def unhex_str(s):
+  return B(unhexlify(b(s)))
+
 def b64d(s):
   '''Lenient base64 decode'''
 
@@ -52,62 +76,83 @@ def b64d(s):
   if l != 0:
     s += '='* (4 - l)
 
-  return s.decode('base64')
+  return b64decode(s)
 
 def base36encode(number):
-    if not isinstance(number, (int, long)):
-        raise TypeError('number must be an integer')
-    if number < 0:
-        raise ValueError('number must be positive')
+  if not isinstance(number, int):
+    raise TypeError('number must be an integer')
+  if number < 0:
+    raise ValueError('number must be positive')
 
-    alphabet, base36 = ['0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ', '']
+  alphabet, base36 = ['0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ', '']
 
-    while number:
-        number, i = divmod(number, 36)
-        base36 = alphabet[i] + base36
+  while number:
+    number, i = divmod(number, 36)
+    base36 = alphabet[i] + base36
 
-    return base36 or alphabet[0]
+  return base36 or alphabet[0]
 
 def base36decode(number):
-    return int(number, 36)
+  return int(number, 36)
 
 def random_bytes(n):
-  return ''.join(chr(randint(0, 255)) for _ in range(n))
+  return bytes(randint(0, 255) for _ in range(n))
 
 def random_printables(n):
-  return ''.join(chr(randint(32, 126)) for _ in range(n))
+  return bytes(randint(32, 126) for _ in range(n))
 
-def random_chars(n, charset='ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789 '):
-  return ''.join(charset[randint(0, len(charset)-1)] for _ in range(n))
+def random_str(n, charset=None):
+  if charset:
+    return ''.join(charset[randint(0, len(charset)-1)] for _ in range(n))
+  else:
+    return str(random_bytes(n), 'latin1')
+
+def random_alnum(n):
+  return random_str(n, 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789 ')
 
 def xor(text, key):
-  return ''.join([chr(ord(c1) ^ ord(c2)) for c1, c2 in itertools.izip(text, itertools.cycle(key))])
+  if isinstance(text, str) and isinstance(key, str):
+    return ''.join([chr(ord(c1) ^ ord(c2)) for c1, c2 in zip(text, itertools.cycle(key))])
+  else:
+    return bytes(c1 ^ c2 for c1, c2 in zip(text, itertools.cycle(key)))
 
 def chunk(s, bs):
   return [s[i:i + bs] for i in range(0, len(s), bs)]
 
 def chunk_pp(s, bs):
-  return map(lambda c: c.encode('hex'), chunk(s, bs))
+  return [hex_str(ss) for ss in chunk(s, bs)]
 
 def ichunk(s, bs):
-  for i in xrange(0, len(s), bs):
+  for i in range(0, len(s), bs):
     yield s[i:i + bs]
+
+def bytes_to_int(s):
+  return int.from_bytes(b(s), 'big')
+
+def int_to_bytes(n):
+  return _long_to_bytes(n)
 
 def _long_to_bytes(n):
   s = '%x' % n
   s = s if len(s) % 2 == 0 else '0' + s
-  return s.decode('hex')
+  return unhex_str(s)
 
 def _bytes_to_long(s):
-  return long(s.encode('hex'), 16)
+  return int(hex_str(s), 16)
+
+def sha256(s):
+  return hashlib.sha256(b(s)).digest()
+
+def sha1(s):
+  return B(hashlib.sha1(b(s)).digest())
 
 def pkcs7pad(s, bs):
   pad = bs - (len(s) % bs)
-  return '%s%s' % (s, chr(pad) * pad)
+  return s + bytes([pad] * pad)
 
 def pkcs7unpad(s):
-  pad = ord(s[-1])
-  if s[-pad:] != chr(pad) * pad:
+  pad = s[-1]
+  if s[-pad:] != bytes([pad] * pad):
     raise PaddingException('Bad padding')
   return s[:-pad]
 
@@ -123,14 +168,15 @@ class Timing:
     self.time = time() - self.t1
 
 def pairwise(iterable):
-    "s -> (s0,s1), (s1,s2), (s2, s3), ..."
-    a, b = itertools.tee(iterable)
-    next(b, None)
-    return zip(a, b)
+  "s -> (s0,s1), (s1,s2), (s2, s3), ..."
+  a, b = itertools.tee(iterable)
+  next(b, None)
+  return zip(a, b)
 
 def score_english(msg, english="etaonrishd .,\nlfcmugypwbvkjxqz-_!?'\"/1234567890*"):
+  msg = B(msg)
 
-  stats = Counter(filter(lambda c: c.lower() in english, msg))
+  stats = Counter(c for c in msg.lower() if c in english)
   score = 0
 
   for c in msg:
@@ -139,14 +185,13 @@ def score_english(msg, english="etaonrishd .,\nlfcmugypwbvkjxqz-_!?'\"/123456789
       #continue
       score -= len(english)
     else:
-      #score += (len(english) - where) * 2
       score += len(english) - where
 
-  #return score, stats
-  return score / len(msg), stats
+  #return score / len(msg), stats
+  return score, stats
 
 def count_printable(msg):
-  return len([c for c in msg if ord(c) >= 0x20 and ord(c) < 0x7f])
+  return sum(1 for c in msg if c >= 0x20 and c < 0x7f)
 
 def byteflip(ciphertext, oracle):
   '''Flip only one bit in a byte'''
@@ -176,39 +221,33 @@ def bitflipall(ciphertext, oracle):
       payload = ciphertext[:i] + chr(n) + ciphertext[i + 1:]
       yield i, oracle(payload)
 
-def sha256(s):
-  return hashlib.sha256(s).digest()
+# http://eddmann.com/posts/implementing-rot13-and-rot-n-caesar-ciphers-in-python/
+def rot_alpha(n):
+  from string import ascii_lowercase as lc, ascii_uppercase as uc
+  lookup = str.maketrans(lc + uc, lc[n:] + lc[:n] + uc[n:] + uc[:n])
+  return lambda s: s.translate(lookup)
 
 # }}}
 
 # XOR {{{
-def crack_single_char_xor(ciphertext):
-  best_score, best_char = 0, '\x00'
-
-  for char in map(chr, range(256)):
-    xored = xor(ciphertext, char)
-    score, _ = score_english(xored)
-
-    if score > best_score:
-      best_score, best_char = score, char
-
-  return best_char
-
-def hamming(str1, str2):
-  return sum(bin(ord(c1) ^ ord(c2)).count('1') for c1, c2 in zip(str1, str2))
+def hamming(s1, s2):
+  return sum(bin(c1 ^ c2).count('1') for c1, c2 in zip(s1, s2))
 
 def find_xor_keysize(ciphertext):
   distances = {}
 
-  for keysize in range(2, 40):
-  
+  for keysize in range(2, min(len(ciphertext) // 3, 40)):
+
+    while len(ciphertext) <= keysize * 4:
+      ciphertext += ciphertext
+
     dists = []
     for i in range(0, len(ciphertext) - keysize * 4, keysize):
-  
+
       m1 = ciphertext[i:i+keysize]
       m2 = ciphertext[i+keysize:i+keysize*2]
-      m3 = ciphertext[i+keysize*2:i+keysize*4]
-      m4 = ciphertext[i+keysize*3:i+keysize*5]
+      m3 = ciphertext[i+keysize*2:i+keysize*3]
+      m4 = ciphertext[i+keysize*3:i+keysize*4]
   
       avg = (hamming(m1, m2) + hamming(m2, m3) + hamming(m3, m4) + hamming(m4, m1)) / 4.0
       dists.append(avg / keysize)
@@ -218,29 +257,41 @@ def find_xor_keysize(ciphertext):
   return sorted(distances.items(), key=lambda x: x[1])
 
 def transpose(text, size):
-  '''[[1,2,3], [1,2,3], [1,2,3]] => [[1,1,1], [2,2,2], [3,3,3]]'''
+  '''example with size=3: ['abc', 'def', 'ghi'] => ['adg', 'beh', 'cfi']'''
   transposed = []
 
   for i in range(size):
-    chars = ''
+    new = []
 
     for block in chunk(text, size):
       if i >= len(block):
         break
-      chars += block[i]
+      new.append(block[i])
 
-    transposed.append(chars)
+    transposed.append(bytes(new))
 
   return transposed
 
 def find_xor_key(ciphertext, keysize):
   transposed = transpose(ciphertext, keysize)
 
-  key = ''
+  key = b''
   for chars in transposed:
-    key += crack_single_char_xor(chars)
+    key += break_single_char_xor(chars)
 
   return key
+
+def break_single_char_xor(ciphertext):
+  best_score, best_char = 0, 0
+
+  for char in range(256):
+    xored = xor(ciphertext, [char])
+    score, _ = score_english(xored)
+
+    if score > best_score:
+      best_score, best_char = score, char
+
+  return bchr(best_char)
 
 def break_xor_contains_key(ciphertext, plaintext_prefix):
   '''Recover xor key when plaintext contains it. Given ciphertext must end with the key
@@ -294,10 +345,10 @@ def detect_ecb(ciphertext):
     blocks = chunk(ciphertext, bs)
     stats = Counter(blocks)
     
-    if stats.values() != [1]:
+    if list(stats.values()) != [1]:
       break
 
-  stats = [(b, c) for b, c in stats.iteritems() if c > 1]
+  stats = [(b, c) for b, c in stats.items() if c > 1]
   return stats
 
 def detect_ecb2(ciphertext):
@@ -313,14 +364,14 @@ def detect_ecb2(ciphertext):
     if stats:
       break
   
-  stats = [(b, c) for b, c in stats.iteritems() if c > 1]
+  stats = [(b, c) for b, c in stats.items() if c > 1]
   return stats
 
 def find_blocksize(encryption_oracle):
   prev_size = 0
 
   for i in range(512):
-    size = len(encryption_oracle('A'*i))
+    size = len(encryption_oracle(b'A'*i))
 
     if prev_size > 0 and size != prev_size:
       break
@@ -345,7 +396,7 @@ def sizeof_pfxsfx(encryption_oracle, bs):
     return -1
 
   candidates = []
-  for c in 'ABC':
+  for c in [b'A', b'B', b'C']:
     for n in range(bs, bs * 3):
       blocks = chunk(encryption_oracle(c * n), bs)
       i = indexof_pair(blocks)
@@ -386,34 +437,34 @@ def decrypt_suffix(encryption_oracle, bs=None, prefix_size=None, suffix_size=Non
     bs = find_blocksize(encryption_oracle)
 
   if verbose:
-    print '[+] blocksize: %d' % bs
+    print('[+] blocksize: %d' % bs)
 
   if prefix_size is None or suffix_size is None or char is None:
     prefix_size, suffix_size, char = sizeof_pfxsfx(encryption_oracle, bs)
 
   if charset is None:
-    charset = map(chr, range(256))
+    charset = [bchr(c) for c in range(256)]
 
   if verbose:
-    print '[+] prefix_size: %d, suffix_size: %d, char: %s' % (prefix_size, suffix_size, char)
+    print('[+] prefix_size: %d, suffix_size: %d, char: %s' % (prefix_size, suffix_size, char))
 
-  ref_index = (prefix_size + suffix_size) / bs
-  decrypted = ''
+  ref_index = (prefix_size + suffix_size) // bs
+  decrypted = b''
 
   for n in reversed(range(suffix_size + (bs - ((prefix_size + suffix_size) % bs)))):
     data = char * n
     ref_block = chunk(encryption_oracle(data), bs)[ref_index]
 
     for c in charset:
-      msg = '%s%s%s' % (data, ''.join(decrypted), c)
+      msg = data + decrypted + c
 
       if ref_block == chunk(encryption_oracle(msg), bs)[ref_index]:
         decrypted += c
         if verbose:
-          print '%r' % decrypted
+          print('decrypted: %r' % decrypted)
         break
     else:
-      decrypted += '?'
+      decrypted += b'?'
 
   return decrypted[:suffix_size]
 
@@ -428,7 +479,7 @@ def decrypt_ecb(msg, key):
 
 def encrypt_cbc(msg, key, iv):
   ct = iv
-  result = ''
+  result = b''
   for pt in chunk(msg, AES.block_size):
     ct = encrypt_ecb(xor(ct, pt), key)
     result += ct
@@ -438,7 +489,7 @@ def encrypt_cbc(msg, key, iv):
 def decrypt_cbc(msg, key, iv=None):
   if iv:
     msg = iv + msg
-  result = ''
+  result = b''
   for prev_ct, ct in pairwise(chunk(msg, AES.block_size)):
     result += xor(prev_ct, decrypt_ecb(ct, key))
 
@@ -468,7 +519,7 @@ class PaddingOracle(object):
     plaintext = pkcs7pad(plaintext, block_size)
 
     if iv is None:
-      iv = '\x00' * block_size
+      iv = b'\x00' * block_size
 
     encrypted = iv
     blocks = chunk(plaintext, block_size)
@@ -505,6 +556,7 @@ class PaddingOracle(object):
       while True:
         block, inter = self.pop_result()
         logging.debug('block: %r, inter: %r' % (block, inter))
+
         idx = blocks.index(block)
         decrypted[idx] = xor(inter, blocks[idx - 1])
 
@@ -516,7 +568,7 @@ class PaddingOracle(object):
     except KeyboardInterrupt:
       pass
 
-    return ''.join(s for _, s in sorted(decrypted.iteritems()))
+    return b''.join(s for _, s in sorted(decrypted.items()))
 
   def bust(self, block, block_size):
     logging.debug('Processing block %r', block)
@@ -528,18 +580,18 @@ class PaddingOracle(object):
     last_ok = 0
     while retries < self.max_retries:
 
-      for byte_num in reversed(xrange(block_size)):
+      for byte_num in reversed(range(block_size)):
 
         r = 256
         if byte_num == block_size - 1 and last_ok > 0:
           r = last_ok
 
-        for i in reversed(xrange(r)):
+        for i in reversed(range(r)):
 
           test_bytes[byte_num] = i
 
           try:
-            self.oracle(str(test_bytes))
+            self.oracle(test_bytes)
 
             if byte_num == block_size - 1:
                 last_ok = i
@@ -553,7 +605,7 @@ class PaddingOracle(object):
 
           intermediate_bytes[byte_num] = decrypted_byte
 
-          for k in xrange(byte_num, block_size):
+          for k in range(byte_num, block_size):
             test_bytes[k] ^= current_pad_byte
             test_bytes[k] ^= next_pad_byte
 
@@ -573,7 +625,7 @@ class PaddingOracle(object):
                          'maximum allotted retries (%d)' % (
                          byte_num, block, self.max_retries))
 
-    self.resultq.put((block, str(intermediate_bytes)))
+    self.resultq.put((block, intermediate_bytes))
 
 # }}}
 
@@ -585,10 +637,10 @@ class CTRCipher:
 
   def encrypt(self, msg):
     def pack(n):
-      return ''.join(chr((n >> i) & 0xFF) for i in range(0, 64, 8))
+      return bytes((n >> i) & 0xFF for i in range(0, 64, 8))
     
     block_count = 0
-    result = ''
+    result = b''
 
     for block in chunk(msg, len(self.key)):
     
@@ -605,7 +657,7 @@ class CTRCipher:
 
   def edit(self, ciphertext, offset, newtext):
     '''seek into the ciphertext and re-encrypt with different plaintext (faster than edit2)'''
-    newct = self.encrypt('A' * offset + newtext)[offset:]
+    newct = self.encrypt(b'A' * offset + newtext)[offset:]
     return ciphertext[:offset] + newct + ciphertext[offset + len(newtext):]
 
   def edit2(self, ciphertext, offset, newtext):
@@ -640,7 +692,7 @@ class MT19937:
   def seed_mt(self, seed):
     self.index = MT19937.n
     self.MT[0] = seed
-    for i in xrange(1, MT19937.n):
+    for i in range(1, MT19937.n):
       self.MT[i] = to_int32(
         MT19937.f * (self.MT[i - 1] ^ (self.MT[i - 1] >> (MT19937.w - 2))) + i)
 
@@ -662,7 +714,7 @@ class MT19937:
     return to_int32(y)
 
   def twist(self):
-    for i in xrange(MT19937.n):
+    for i in range(MT19937.n):
       y = to_int32((self.MT[i] & 0x80000000) +
                  (self.MT[(i + 1) % MT19937.n] & 0x7fffffff))
 
@@ -722,9 +774,9 @@ def mt_encryptdecrypt(msg, key):
   mt = MT19937(key)
 
   if len(msg) == 0:
-    return ''
+    return b''
 
-  keystream = ''
+  keystream = b''
   while len(keystream) < len(msg):
     keystream += struct.pack('<I', (mt.extract_number()))
 
@@ -756,10 +808,10 @@ class SHA1:
     lrot = lambda x, n: (x << n) | (x >> (32 - n))
     w = []
 
-    for j in xrange(len(chunk) // 32):
+    for j in range(len(chunk) // 32):
       w.append(int(chunk[j * 32:j * 32 + 32], 2))
 
-    for i in xrange(16, 80):
+    for i in range(16, 80):
       w.append(lrot(w[i - 3] ^ w[i - 8] ^ w[i - 14] ^ w[i - 16], 1)
           & 0xffffffff)
 
@@ -769,7 +821,7 @@ class SHA1:
     d = self._h3
     e = self._h4
 
-    for i in xrange(80):
+    for i in range(80):
 
       if i <= i <= 19:
         f, k = d ^ (b & (c ^ d)), 0x5a827999
@@ -792,7 +844,7 @@ class SHA1:
   def update(self, message):
     length = format(len(message) * 8, '064b')
 
-    message = ''.join(format(ord(c), '08b') for c in message) + '1'
+    message = ''.join(format(c, '08b') for c in message) + '1'
     while not len(message) % 512 == 448:
       message += '0'
     message += length
@@ -808,7 +860,7 @@ class SHA1:
     length += 8
     length = format(length * 8, '064b')
 
-    message = ''.join(format(ord(c), '08b') for c in append) + '1'
+    message = ''.join(format(c, '08b') for c in append) + '1'
     while not len(message) % 512 == 448:
       message += '0'
     message += length
@@ -818,10 +870,10 @@ class SHA1:
     for i in range(len(message) // 512):
       self.transform(message[i * 512:i * 512 + 512])
 
-    padded = original + '\x80'
+    padded = original + b'\x80'
     while not (prefix_len + len(padded)) % 64 == 56:
-      padded += '\x00'
-    padded += format((prefix_len + len(original)) * 8, '016x').decode('hex')
+      padded += b'\x00'
+    padded += unhexlify(format((prefix_len + len(original)) * 8, '016x'))
 
     return padded + append
 
@@ -839,9 +891,9 @@ def hmac_sha1(key, msg):
   if len(key) > 64:
     key = hashlib.sha1(key).digest()
   if len(key) < 64:
-    key += '\x00' * (64 - len(key))
-  o_key_pad = xor('\x5c' * 64, key)
-  i_key_pad = xor('\x36' * 64, key)
+    key += b'\x00' * (64 - len(key))
+  o_key_pad = xor(b'\x5c' * 64, key)
+  i_key_pad = xor(b'\x36' * 64, key)
   return hashlib.sha1(o_key_pad + hashlib.sha1(i_key_pad + msg).digest()).digest()
 
 def insecure_compare(s1, s2):
@@ -854,10 +906,10 @@ def insecure_compare(s1, s2):
 def hmac_oracle_mock(msg, sig):
   key = 'you will never guess my key'
   sleep(randint(0, 5) / 1000)
-  return insecure_compare(hmac_sha1(key, msg), sig)
+  return insecure_compare(hmac_sha1(b(key), b(msg)), b(sig))
 
 def hmac_oracle(msg, sig):
-  r = requests.get('http://127.0.0.1:8181/?file=%s&signature=%s' % (msg, sig.encode('hex')))
+  r = requests.get('http://127.0.0.1:8181/?file=%s&signature=%s' % (msg, hex_str(sig)))
   return r.status_code == 200
 
 # attack takes too long to be in unit tests
@@ -875,16 +927,17 @@ def break_hmac():
         with Timing() as timing:
           #if hmac_oracle(filename, signature): # needs hmac_break_server.py running
           if hmac_oracle_mock(filename, signature):
-            print 'found signature for %s is %r' % (filename, found)
+            # signature for /etc/passwd is 'Zg\x01\xd5\xe5n;\xb6MHz,W\xea\xebAD\xb1\xa5O'
+            print('found signature for %s is %r' % (filename, found))
             return found
 
         stats[c] += timing.time
 
     top5 = stats.most_common(5)
-    print 'top 5: %r' % top5
+    print('top 5: %r' % top5)
 
     found += top5[0][0]
-    print 'found so far: %r' % found
+    print('found so far: %r' % found)
 
 # }}}
 
@@ -893,13 +946,13 @@ def params_dh(p=0xffffffffffffffffc90fdaa22168c234c4c6628b80dc1cd129024e088a67cc
   return p, g
 
 def keygen_dh(p, g):
-  privkey = bytes_to_long(random_bytes(16)) % p
+  privkey = bytes_to_int(random_bytes(16)) % p
   pubkey = pow(g, privkey, p)
 
   return privkey, pubkey
 
 def derivekey(s):
-    return hashlib.sha1('%x' % s).digest()[:16]
+    return hashlib.sha1(b'%x' % s).digest()[:16]
 
 class DH_Peer:
   def __init__(self, p, g):
@@ -1000,7 +1053,7 @@ class SRP_Peer:
     self.k = k
 
     self.email = email
-    self.password = password
+    self.password = b(password)
 
     self.privkey, self.pubkey = keygen_dh(self.N, self.g)
 
@@ -1008,14 +1061,14 @@ class SRP_Peer:
     return hmac.new(self.K, self.salt, hashlib.sha256).hexdigest()
 
 def compute_u(server_pubkey, client_pubkey):
-  return bytes_to_long(sha256(str(server_pubkey) + str(client_pubkey)))
+  return bytes_to_int(sha256(str(server_pubkey) + str(client_pubkey)))
 
 class SRP_Client(SRP_Peer):
   def compute_sharedkey(self, salt, server_pubkey):
     self.salt = salt
 
     u = compute_u(server_pubkey, self.pubkey)
-    x = bytes_to_long(sha256(self.salt + self.password))
+    x = bytes_to_int(sha256(self.salt + self.password))
     gx = pow(self.g, x, self.N)
     S = pow(server_pubkey - self.k * gx, self.privkey + u * x, self.N)
 
@@ -1029,7 +1082,7 @@ class SRP_Client(SRP_Peer):
     self.salt = salt
 
     # this time u is provided by the server
-    x = bytes_to_long(sha256(self.salt + self.password))
+    x = bytes_to_int(sha256(self.salt + self.password))
     S = pow(server_pubkey, self.privkey + u * x, self.N)
 
     self.K = sha256(str(S))
@@ -1040,7 +1093,7 @@ class SRP_Server(SRP_Peer):
 
     self.salt = random_bytes(4)
 
-    x = bytes_to_long(sha256(self.salt + self.password))
+    x = bytes_to_int(sha256(self.salt + self.password))
     v = pow(self.g, x, self.N)
 
     self.pubkey = (self.k * v + self.pubkey) % self.N
@@ -1056,11 +1109,11 @@ class SRP_Server(SRP_Peer):
 
     self.salt = random_bytes(4)
 
-    x = bytes_to_long(sha256(self.salt + self.password))
+    x = bytes_to_int(sha256(self.salt + self.password))
     v = pow(self.g, x, self.N)
 
     self.pubkey = pow(self.g, self.privkey, self.N) # this time the server pubkey doesn't depend on the password
-    self.u = bytes_to_long(random_bytes(16)) # this time u is a 128 bit random number
+    self.u = bytes_to_int(random_bytes(16)) # this time u is a 128 bit random number
 
     vu = pow(v, self.u, self.N)
     S = pow(client_pubkey * vu, self.privkey, self.N)
@@ -1096,7 +1149,7 @@ def srp_bypass(fake_pubkey):
 
 def srp_mitm():
   email = 'client@example.com'
-  password = random_chars(4, charset='0123456789')
+  password = random_str(4, charset='0123456789')
 
   server = SRP_Server(email, 'iwilljustcrackit')
   client = SRP_Client(email, password)
@@ -1107,8 +1160,10 @@ def srp_mitm():
   return server, client
 
 def srp_crack_password(server, client_g, client_N, client_pubkey, mac):
-  for pw in itertools.imap(lambda p: ''.join(p), itertools.product('0123456789', repeat=4)):
-    x = bytes_to_long(sha256(server.salt + pw))
+  for prod in itertools.product(b'0123456789', repeat=4):
+    pw = bytes(prod)
+
+    x = bytes_to_int(sha256(server.salt + pw))
     v = pow(client_g, x, client_N)
     vu = pow(v, server.u, client_N)
 
@@ -1192,7 +1247,7 @@ def rsa_broadcast_attack(pairs, exponent=3):
   res %= N
   rec, _ = iroot(res, exponent)
 
-  return long_to_bytes(rec)
+  return int_to_bytes(rec)
 
 def rsa_unpadded_message_attack(ct, modulus, exponent=3):
   while True:
@@ -1202,7 +1257,7 @@ def rsa_unpadded_message_attack(ct, modulus, exponent=3):
 
     ct += modulus
 
-  return long_to_bytes(rec)
+  return int_to_bytes(rec)
 
 def rsa_unpadded_decryption_oracle(decryption_oracle, pubkey, ct):
   N, e = pubkey
@@ -1212,41 +1267,41 @@ def rsa_unpadded_decryption_oracle(decryption_oracle, pubkey, ct):
   pt3 = decryption_oracle((ct2 * ct) % N)
 
   pt = (pt3 * invmod(pt2, N)) % N
-  return long_to_bytes(pt)
+  return int_to_bytes(pt)
 
 ASN1_SHA1 = '\x30\x21\x30\x09\x06\x05\x2b\x0e\x03\x02\x1a\x05\x00\x04\x14'
 
 def rsa_bleichenbacher_e3_signature_forgery(msg):
-  modlen = 1024 / 8 # attack for a 1024-bit modulus
+  modlen = 1024 // 8 # attack for a 1024-bit modulus
 
-  block = '\x00\x01\xff\x00' + ASN1_SHA1 + hashlib.sha1(msg).digest()
+  block = '\x00\x01\xff\x00' + ASN1_SHA1 + sha1(msg)
   block += '\x7f' * (modlen - 4 - len(ASN1_SHA1) - 20) # right-pad to approx half the interval
 
-  sig, _ = iroot(bytes_to_long(block), 3)
-  return long_to_bytes(sig)
+  sig, _ = iroot(bytes_to_int(block), 3)
+  return int_to_bytes(sig)
 
 def rsa_bleichenbacher_e3_signature_forgery_easy(msg, modulus_size=1024):
   '''using easy suffix computation '''
   '''https://blog.filippo.io/bleichenbacher-06-signature-forgery-in-python-rsa/ '''
   '''https://grocid.net/2016/06/05/backdoorctf16-baby/'''
 
-  suffix = '\x00' + ASN1_SHA1 + hashlib.sha1(msg).digest()
+  suffix = '\x00' + ASN1_SHA1 + sha1(msg)
 
-  assert bytes_to_long(suffix) % 2 == 1 # easy suffix computation only works with odd target
+  assert bytes_to_int(suffix) % 2 == 1 # easy suffix computation only works with odd target
   sig_suffix = 1
 
   for b in range(len(suffix) * 8):
-    if get_bit(sig_suffix ** 3, b) != get_bit(bytes_to_long(suffix), b):
+    if get_bit(sig_suffix ** 3, b) != get_bit(bytes_to_int(suffix), b):
       sig_suffix = set_bit(sig_suffix, b, 1)
 
-  assert long_to_bytes(sig_suffix ** 3).endswith(suffix)
+  assert int_to_bytes(sig_suffix ** 3).endswith(suffix)
 
   while True:
-    prefix = '\x00\x01' + random_bytes(modulus_size / 8 - 2)
-    sig_prefix, _ = iroot(bytes_to_long(prefix), 3)
-    sig = long_to_bytes(sig_prefix)[:-len(suffix)] + long_to_bytes(sig_suffix)
+    prefix = b'\x00\x01' + random_bytes(modulus_size // 8 - 2)
+    sig_prefix, _ = iroot(bytes_to_int(prefix), 3)
+    sig = int_to_bytes(sig_prefix)[:-len(suffix)] + int_to_bytes(sig_suffix)
 
-    if '\x00' not in long_to_bytes(bytes_to_long(sig) ** 3)[:-len(suffix)]:
+    if '\x00' not in int_to_bytes(bytes_to_int(sig) ** 3)[:-len(suffix)]:
       return sig
 
 # }}}
@@ -1266,7 +1321,7 @@ def keygen_dsa(p=None, q=None, g=None):
   return privkey, pubkey
 
 def hash_dsa(s):
-  return bytes_to_long(hashlib.sha1(s).digest())
+  return bytes_to_int(hashlib.sha1(b(s)).digest())
 
 def sign_dsa(msg, privkey, safe=True):
   (p, q, g), x = privkey
@@ -1327,16 +1382,16 @@ class Tests(unittest.TestCase):
 
   # Utils {{{
   def test_pkcs7unpad(self):
-    for bs in xrange(100):
-      for msg_size in xrange(bs * 3):
+    for bs in range(100):
+      for msg_size in range(bs * 3):
 
         msg = random_bytes(msg_size)
         padded = pkcs7pad(msg, bs)
         unpadded = pkcs7unpad(padded)
         self.assertTrue(unpadded == msg)
 
-        pad = ord(padded[-1])
-        new = padded[-pad:] + chr(pad + 1) * pad
+        pad = padded[-1]
+        new = padded[-pad:] + bytes([pad + 1]* pad)
         with self.assertRaises(PaddingException):
           pkcs7unpad(new)
 
@@ -1346,7 +1401,7 @@ class Tests(unittest.TestCase):
   def test_find_xor_keysize(self):
     for keysize in range(1, 40):
       key = random_bytes(keysize)
-      ciphertext = xor(plaintext * 4, key)
+      ciphertext = xor(plaintext, key)
 
       found_keysize = find_xor_keysize(ciphertext)[0][0]
       self.assertTrue(found_keysize % keysize == 0)
@@ -1365,7 +1420,7 @@ class Tests(unittest.TestCase):
     key = 'A quart jar of oil mixed with zinc oxide makes a very bright paint|'
 
     for size in range(5, len(key) - 5):
-      plaintext = random_chars(size, '0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ!"#$%&\'()*+,-./:;<=>?@[\\]^_`{|}~ ') + key
+      plaintext = random_str(size, '0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ!"#$%&\'()*+,-./:;<=>?@[\\]^_`{|}~ ') + key
       ciphertext = xor(plaintext, key)
 
       for k in break_xor_contains_key(ciphertext, plaintext[:5]):
@@ -1381,6 +1436,7 @@ class Tests(unittest.TestCase):
 
     def encryption_oracle(s):
       pt = pkcs7pad(s, AES.block_size)
+
       if mode == 'ECB':
         return encrypt_ecb(pt, key)
       elif mode == 'CBC':
@@ -1388,7 +1444,7 @@ class Tests(unittest.TestCase):
 
     for mode in ['ECB', 'CBC']:
       for key_size in AES.key_size:
-        for _ in xrange(100):
+        for _ in range(100):
           key = random_bytes(key_size)
           iv = random_bytes(AES.block_size)
 
@@ -1407,7 +1463,7 @@ class Tests(unittest.TestCase):
       blocks = chunk(data, AES.block_size)
       shuffle(blocks)
 
-      data = ''.join(blocks)
+      data = b''.join(blocks)
 
       if randint(0, 1) == 0:
         return encrypt_cbc(data, key, random_bytes(AES.block_size)), 'CBC'
@@ -1415,7 +1471,7 @@ class Tests(unittest.TestCase):
         return encrypt_ecb(data, key), 'ECB'
 
     for pfx_size, sfx_size in itertools.product(range(50), repeat=2):
-      ct, mode = encryption_oracle('A' * AES.block_size * 3, pfx_size, sfx_size)
+      ct, mode = encryption_oracle(b'A' * AES.block_size * 3, pfx_size, sfx_size)
 
       stats = detect_ecb(ct)
       if stats:
@@ -1424,11 +1480,11 @@ class Tests(unittest.TestCase):
   def test_sizeof_pfxsfx(self):
 
     def encryption_oracle(s):
-      data = '%s%s%s' % (pfx, s, sfx)
+      data = pfx + s + sfx
       return encrypt_ecb(pkcs7pad(data, AES.block_size), key)
 
     for key_size in AES.key_size:
-      for max_size in xrange(0, AES.block_size * 3):
+      for max_size in range(0, AES.block_size * 3):
         key = random_bytes(key_size)
         pfx = random_bytes(randint(0, max_size))
         sfx = random_bytes(randint(0, max_size))
@@ -1441,11 +1497,11 @@ class Tests(unittest.TestCase):
     '''https://cryptopals.com/sets/2/challenges/14'''
 
     def encryption_oracle(s):
-      data = '%s%s%s' % (pfx, s, sfx)
+      data = pfx + s + sfx
       return encrypt_ecb(pkcs7pad(data, AES.block_size), key)
 
     for key_size in AES.key_size:
-      for max_size in xrange(0, AES.block_size * 3):
+      for max_size in range(0, AES.block_size * 3):
         key = random_bytes(key_size)
         pfx = random_bytes(randint(0, max_size))
         sfx = random_bytes(randint(0, max_size))
@@ -1460,7 +1516,7 @@ class Tests(unittest.TestCase):
   # TODO add tests with other algorithms (e.g. DES)
   def test_cbc_encrypt_decrypt(self):
     for key_size in AES.key_size:
-      for msg_size in xrange(AES.block_size * 3):
+      for msg_size in range(AES.block_size * 3):
         msg = random_bytes(msg_size)
         key = random_bytes(key_size)
         iv = random_bytes(AES.block_size)
@@ -1474,26 +1530,26 @@ class Tests(unittest.TestCase):
     '''Recover the key from CBC with IV=Key '''
     '''https://cryptopals.com/sets/4/challenges/27'''
 
-    for msg_size in xrange(100):
+    for msg_size in range(100):
 
       key = random_bytes(AES.block_size) # key must be same length as iv
 
       def leak(s):
         dec = decrypt_cbc(s, key, iv=key)
 
-        if any(x for x in dec if x not in string.printable):
-          raise ValueError('non compliant message: %s' % dec)
+        if any(x for x in dec if x not in bytes(string.printable, 'ascii')):
+          raise ValueError('non compliant message', dec)
 
       pt = random_printables(msg_size)
       ct = encrypt_cbc(pt, key, iv=key)
 
       c0 = chunk(ct, AES.block_size)[0]
-      payload = c0 + '\x00' * AES.block_size + c0
+      payload = c0 + b'\x00' * AES.block_size + c0
 
       try:
         leak(payload)
       except ValueError as e:
-        decrypted = chunk(e.message[23:], AES.block_size)
+        decrypted = chunk(e.args[1], AES.block_size)
         recovered = xor(decrypted[0], decrypted[2])
 
       self.assertTrue(key == recovered)
@@ -1502,7 +1558,7 @@ class Tests(unittest.TestCase):
 
   # Padding Oracle {{{
   def test_padding_oracle_encrypt(self):
-    key='YELLOW SUBMARINE'
+    key = b'YELLOW SUBMARINE'
 
     def oracle_decrypt(data):
       try:
@@ -1517,14 +1573,14 @@ class Tests(unittest.TestCase):
 
     padbuster = PadBuster()
 
-    for i in xrange(10):
-      msg = random_bytes(i * AES.block_size + randint(1, AES.block_size))
+    for i in range(16):
+      msg = random_bytes(i * AES.block_size + i % AES.block_size)
       forged = padbuster.encrypt(msg, AES.block_size)
 
       self.assertTrue(pkcs7unpad(decrypt_cbc(forged, key)) == msg)
 
   def test_padding_oracle_decrypt(self):
-    key='YELLOW SUBMARINE'
+    key = b'YELLOW SUBMARINE'
 
     def oracle_decrypt(data):
       try:
@@ -1539,8 +1595,8 @@ class Tests(unittest.TestCase):
 
     padbuster = PadBuster()
 
-    for i in xrange(10):
-      msg = random_bytes(i * AES.block_size + randint(1, AES.block_size))
+    for i in range(16):
+      msg = random_bytes(i * AES.block_size + i % AES.block_size)
       ct = encrypt_cbc(pkcs7pad(msg, AES.block_size), key, random_bytes(AES.block_size))
       pt = padbuster.decrypt(ct, AES.block_size)
       self.assertTrue(pkcs7unpad(pt) == msg)
@@ -1552,7 +1608,7 @@ class Tests(unittest.TestCase):
     '''https://cryptopals.com/sets/3/challenges/18'''
 
     for key_size in AES.key_size:
-      for msg_size in xrange(1, 100):
+      for msg_size in range(1, 100):
         key = random_bytes(key_size)
         msg = random_bytes(msg_size)
 
@@ -1560,12 +1616,12 @@ class Tests(unittest.TestCase):
 
   def test_ctr_edit(self):
     key = random_bytes(16)
-    nonce = int(random_bytes(8).encode('hex'), 16)
+    nonce = int(hexlify(random_bytes(8)), 16)
 
     msg_size = 100
     msg = random_bytes(msg_size)
 
-    for offset in xrange(msg_size):
+    for offset in range(msg_size):
       newtext_size = randint(1, msg_size - offset)
       newtext = random_bytes(newtext_size)
 
@@ -1583,30 +1639,30 @@ class Tests(unittest.TestCase):
     '''Break fixed-nonce CTR mode '''
     '''https://cryptopals.com/sets/3/challenges/20'''
 
-    lines = plaintext.split('\n')
+    lines = plaintext.split(b'\n')
 
     plaintexts = []
     for i in range(len(lines) * 10):
 
       line = lines[i % len(lines)]
-      offset = i / len(lines)
+      offset = i // len(lines)
 
       pt = line[offset:]
       plaintexts.append(pt)
 
     ciphertexts = []
     for pt in plaintexts:
-      ct = CTRCipher('YELLOW SUBMARINE', 0).encrypt(pt)
+      ct = CTRCipher(b'YELLOW SUBMARINE', 0).encrypt(pt)
       ciphertexts.append(ct)
 
     min_len = min(map(len, ciphertexts))
     max_len = max(map(len, ciphertexts))
 
-    transposed = transpose(''.join(c.ljust(max_len, '\x00') for c in ciphertexts), max_len)
+    transposed = transpose(b''.join(c.ljust(max_len, b'\x00') for c in ciphertexts), max_len)
 
-    key = ''
+    key = b''
     for chars in transposed:
-      best_char = crack_single_char_xor(chars)
+      best_char = break_single_char_xor(chars)
       key += best_char
 
     for i in range(len(lines)):
@@ -1621,7 +1677,7 @@ class Tests(unittest.TestCase):
     '''https://cryptopals.com/sets/4/challenges/25'''
 
     key = random_bytes(16)
-    nonce = int(random_bytes(8).encode('hex'), 16)
+    nonce = int(hexlify(random_bytes(8)), 16)
 
     ctr = CTRCipher(key, nonce)
     ciphertext = ctr.encrypt(plaintext)
@@ -1642,7 +1698,7 @@ class Tests(unittest.TestCase):
     mt1.seed_mt(seed)
     mt2.seed_mt(seed)
 
-    for _ in xrange(10**6):
+    for _ in range(10**6):
       self.assertTrue(mt1.extract_number() == mt2.extract_number())
 
   def test_mt19937_crack(self):
@@ -1652,7 +1708,7 @@ class Tests(unittest.TestCase):
     seed1 = randint(40, 1000)
     first = MT19937(seed1).extract_number()
 
-    for seed2 in xrange(1000, 0, -1):
+    for seed2 in range(1000, 0, -1):
       if MT19937(seed2).extract_number() == first:
         break
 
@@ -1662,7 +1718,7 @@ class Tests(unittest.TestCase):
     '''Clone an MT19937 RNG from its output '''
     '''https://cryptopals.com/sets/3/challenges/23'''
 
-    for _ in xrange(100):
+    for _ in range(100):
       mt = MT19937(randint(0, 10**9))
 
       MT = [0] * 624
@@ -1699,13 +1755,13 @@ class Tests(unittest.TestCase):
     def encryption_oracle(s):
       return mt_encryptdecrypt(prefix + s, key)
 
-    pt = 'A' * 14
+    pt = b'A' * 14
     ct = encryption_oracle(pt)
 
     pfx_size = len(ct) - len(pt)
 
     for k in range(0x10000):
-      s = mt_encryptdecrypt('A' * len(ct), k)
+      s = mt_encryptdecrypt(b'A' * len(ct), k)
 
       if s[pfx_size:] == ct[pfx_size:]:
         break
@@ -1714,12 +1770,12 @@ class Tests(unittest.TestCase):
 
     # password reset token
     secret_seed = randint(40, 1000)
-    token = mt_encryptdecrypt('A' * 14, secret_seed)
+    token = mt_encryptdecrypt(b'A' * 14, secret_seed)
 
     best_score = 0
     best_seed = 0
 
-    for seed in xrange(1000, 0, -1):
+    for seed in range(1000, 0, -1):
       score = count_printable(mt_encryptdecrypt(token, seed))
 
       if score > best_score:
@@ -1881,7 +1937,7 @@ class Tests(unittest.TestCase):
       for msg_size in range(1, 50):
         privkey, pubkey = keygen_rsa(key_size, 0x10001)
 
-        pt = bytes_to_long(random_bytes(msg_size))
+        pt = bytes_to_int(random_bytes(msg_size))
         ct = encrypt_rsa(pubkey, pt)
 
         self.assertTrue(decrypt_rsa(privkey, ct) == pt)
@@ -1896,7 +1952,7 @@ class Tests(unittest.TestCase):
     pairs = []
     for _ in range(3):
       _, (n, e) = keygen_rsa(1024, exponent)
-      ct = encrypt_rsa((n, e), bytes_to_long(msg))
+      ct = encrypt_rsa((n, e), bytes_to_int(msg))
 
       pairs.append((n, ct))
 
@@ -1917,13 +1973,13 @@ class Tests(unittest.TestCase):
 
     # making sure msg is bigger than the biggest modulus
     msg = 'the secret msg is '
-    while not bytes_to_long(msg) > max(ns):
-      msg += random_chars(1)
-    msg += random_chars(1000)
+    while not bytes_to_int(msg) > max(ns):
+      msg += random_alnum(1)
+    msg += random_alnum(1000)
 
     pairs = []
     for n in ns:
-      ct = encrypt_rsa((n, exponent), bytes_to_long(msg))
+      ct = encrypt_rsa((n, exponent), bytes_to_int(msg))
       pairs.append((n, ct))
 
     rec = rsa_broadcast_attack(pairs)
@@ -1935,7 +1991,7 @@ class Tests(unittest.TestCase):
     exponent = 3
     msg = 'this is the secret message'
 
-    pt = bytes_to_long(msg)
+    pt = bytes_to_int(msg)
 
     _, (n, e) = keygen_rsa(1024, exponent)
     ct = encrypt_rsa((n, e), pt)
@@ -1960,7 +2016,7 @@ class Tests(unittest.TestCase):
     privkey, pubkey = keygen_rsa(1024, 3)
 
     msg = 'this is a secret message'
-    pt = bytes_to_long(msg)
+    pt = bytes_to_int(msg)
 
     assert pt < pubkey[0] # msg must be smaller than modulus
 
@@ -1977,25 +2033,25 @@ class Tests(unittest.TestCase):
     '''OpenSSL and NSS used to be vulnerable, this attack broke Firefox's TLS certificate validation several years ago'''
 
     def pkcs1_sign(msg):
-      h = hashlib.sha1(msg).digest()
+      h = sha1(msg)
       npad = modlen - 2 - 1 - len(ASN1_SHA1 + h)
       block = '\x00\x01' + ('\xff' * npad) + '\x00' + ASN1_SHA1 + h
 
-      return long_to_bytes(decrypt_rsa((n, d), bytes_to_long(block)))
+      return int_to_bytes(decrypt_rsa((n, d), bytes_to_int(block)))
 
     def pkcs1_verify_bad(msg, sig):
-      cube = long_to_bytes(encrypt_rsa((n, 3), bytes_to_long(sig)))
+      cube = int_to_bytes(encrypt_rsa((n, 3), bytes_to_int(sig)))
 
       if cube[:2] != '\x01\xff':
         return False
 
-      return '\x00' + ASN1_SHA1 + hashlib.sha1(msg).digest() in cube
+      return '\x00' + ASN1_SHA1 + sha1(msg) in cube
 
-    modlen = 1024 / 8
+    modlen = 1024 // 8
 
     for msg_size in range(50):
       (n, d), _ = keygen_rsa(1024, 3)
-      msg = random_chars(msg_size)
+      msg = random_alnum(msg_size)
 
       sig_legit = pkcs1_sign(msg)
       sig_forged = rsa_bleichenbacher_e3_signature_forgery(msg)
@@ -2004,30 +2060,30 @@ class Tests(unittest.TestCase):
       self.assertTrue(pkcs1_verify_bad(msg, sig_forged))
 
   def test_rsa_bleichenbacher_e3_signature_forgery_easy(self):
-    '''python-rsa CVE-2016-1494'''
+   '''python-rsa CVE-2016-1494'''
 
-    def pkcs1_verify_bad(msg, sig):
-      cube = long_to_bytes(bytes_to_long(sig) ** 3)
+   def pkcs1_verify_bad(msg, sig):
+     cube = int_to_bytes(bytes_to_int(sig) ** 3)
 
-      if cube[0] != '\x01':
-        return False
+     if cube[0] != '\x01':
+       return False
 
-      if cube[-36:] != '\x00' + ASN1_SHA1 + hashlib.sha1(msg).digest():
-        return False
+     if cube[-36:] != '\x00' + ASN1_SHA1 + sha1(msg):
+       return False
 
-      return True
+     return True
 
-    def random_msg():
-      while True:
-        msg = random_chars(10)
-        if bytes_to_long(hashlib.sha1(msg).digest()) % 2 == 0:
-          continue
-        return msg
+   def random_msg():
+     while True:
+       msg = random_alnum(10)
+       if bytes_to_int(sha1(msg)) % 2 == 0:
+         continue
+       return msg
 
-    msg = random_msg()
-    sig = rsa_bleichenbacher_e3_signature_forgery_easy(msg)
+   msg = random_msg()
+   sig = rsa_bleichenbacher_e3_signature_forgery_easy(msg)
 
-    self.assertTrue(pkcs1_verify_bad(msg, sig))
+   self.assertTrue(pkcs1_verify_bad(msg, sig))
 
   # }}}
 
@@ -2047,7 +2103,7 @@ class Tests(unittest.TestCase):
     msg = '''For those that envy a MC it can be hazardous to your health
 So be friendly, a matter of life and death, just like a etch-a-sketch
 '''
-    self.assertEquals(hash_dsa(msg), 0xd2d0714f014a9784047eaeccf956520045c45265)
+    self.assertEqual(hash_dsa(msg), 0xd2d0714f014a9784047eaeccf956520045c45265)
 
     y = 0x84ad4719d044495496a3201c8ff484feb45b962e7302e56a392aee4abab3e4bdebf2955b4736012f21a08084056b19bcd7fee56048e004e44984e2f411788efdc837a0d2e5abb7b555039fd243ac01f0fb2ed1dec568280ce678e931868d23eb095fde9d3779191b8c0299d6e07bbb283e6633451e535c45513b2d33c99ea17
     r = 548099063082341131477253921760299949438196259240
@@ -2123,8 +2179,8 @@ So be friendly, a matter of life and death, just like a etch-a-sketch
 
   def test_dsa_bad_params(self):
     '''https://cryptopals.com/sets/6/challenges/45'''
-    msg1 = random_chars(32)
-    msg2 = random_chars(32)
+    msg1 = random_alnum(32)
+    msg2 = random_alnum(32)
 
     # g = 0
     p, q, g = params_dsa(g=0)
@@ -2154,8 +2210,9 @@ So be friendly, a matter of life and death, just like a etch-a-sketch
 # }}}
 
 if __name__ == '__main__':
-  plaintext = '''In 2071, roughly sixty years after an accident with a hyperspace gateway made the Earth uninhabitable, humanity has colonized most of the rocky planets and moons of the Solar System.\n Amid a rising crime rate, the Inter Solar System Police (ISSP) set up a legalized contract system, in which registered bounty hunters (also referred to as "Cowboys") chase criminals and bring them in alive in return for a reward.\n The series protagonists are bounty hunters working from the spaceship Bebop.\n The original crew are Spike Spiegel, an exiled former hitman of the criminal Red Dragon Syndicate, and his partner Jet Black, a former ISSP officer.\n They are later joined by Faye Valentine, an amnesiac con artist; Edward Wong, an eccentric girl skilled in hacking; and Ein, a genetically-engineered Pembroke Welsh Corgi with human-like intelligence.\n Over the course of the series, the team get involved in disastrous mishaps leaving them out of pocket, while often confronting faces and events from their past: these include Jet's reasons for leaving the ISSP, and Faye's past as a young woman from Earth injured in an accident and cryogenically frozen to save her life'''
+  plaintext = b'''In 2071, roughly sixty years after an accident with a hyperspace gateway made the Earth uninhabitable, humanity has colonized most of the rocky planets and moons of the Solar System.\n Amid a rising crime rate, the Inter Solar System Police (ISSP) set up a legalized contract system, in which registered bounty hunters (also referred to as "Cowboys") chase criminals and bring them in alive in return for a reward.\n The series protagonists are bounty hunters working from the spaceship Bebop.\n The original crew are Spike Spiegel, an exiled former hitman of the criminal Red Dragon Syndicate, and his partner Jet Black, a former ISSP officer.\n They are later joined by Faye Valentine, an amnesiac con artist; Edward Wong, an eccentric girl skilled in hacking; and Ein, a genetically-engineered Pembroke Welsh Corgi with human-like intelligence.\n Over the course of the series, the team get involved in disastrous mishaps leaving them out of pocket, while often confronting faces and events from their past: these include Jet's reasons for leaving the ISSP, and Faye's past as a young woman from Earth injured in an accident and cryogenically frozen to save her life'''
 
+  #logging.basicConfig(level=logging.DEBUG)
   unittest.main()
 
 # vim: ts=2 sw=2 sts=2 et fdm=marker bg=dark
