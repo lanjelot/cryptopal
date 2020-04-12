@@ -1,7 +1,6 @@
 from http.server import SimpleHTTPRequestHandler
 from http.server import HTTPServer
 from cryptopal import hmac_sha1, insecure_compare, b
-from time import sleep
 from urllib.parse import urlparse, parse_qs
 from binascii import unhexlify
 
@@ -19,11 +18,11 @@ class MyHTTPRequestHandler(SimpleHTTPRequestHandler):
 
     if not valid:
       self.send_response(500)
-      self.end_headers() 
+      self.end_headers()
     else:
       self.send_response(200)
       self.send_header("Content-Type", 'application/octet-stream')
-      self.end_headers() 
+      self.end_headers()
       self.wfile.write(open(filename))
 
 if __name__ == '__main__':

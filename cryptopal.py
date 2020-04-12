@@ -74,7 +74,7 @@ def b64d(s):
 
   l = len(s) % 4
   if l != 0:
-    s += '='* (4 - l)
+    s += '=' * (4 - l)
 
   return b64decode(s)
 
@@ -128,23 +128,15 @@ def ichunk(s, bs):
 
 def bytes_to_int(s):
   return int.from_bytes(b(s), 'big')
+  #return int(hexlify(b(s)), 16)
 
 def int_to_bytes(n):
-  return _long_to_bytes(n)
-
-def _long_to_bytes(n):
   s = '%x' % n
   s = s if len(s) % 2 == 0 else '0' + s
   return unhex_str(s)
 
-def _bytes_to_long(s):
-  return int(hex_str(s), 16)
-
 def sha256(s):
   return hashlib.sha256(b(s)).digest()
-
-def sha1(s):
-  return B(hashlib.sha1(b(s)).digest())
 
 def pkcs7pad(s, bs):
   pad = bs - (len(s) % bs)
@@ -248,12 +240,12 @@ def find_xor_keysize(ciphertext):
       m2 = ciphertext[i+keysize:i+keysize*2]
       m3 = ciphertext[i+keysize*2:i+keysize*3]
       m4 = ciphertext[i+keysize*3:i+keysize*4]
-  
+
       avg = (hamming(m1, m2) + hamming(m2, m3) + hamming(m3, m4) + hamming(m4, m1)) / 4.0
       dists.append(avg / keysize)
-  
+ 
     distances[keysize] = sum(dists) / len(dists)
-  
+
   return sorted(distances.items(), key=lambda x: x[1])
 
 def transpose(text, size):
@@ -344,7 +336,7 @@ def detect_ecb(ciphertext):
   for bs in [32, 24, 16, 12, 8]:
     blocks = chunk(ciphertext, bs)
     stats = Counter(blocks)
-    
+
     if list(stats.values()) != [1]:
       break
 
@@ -363,7 +355,7 @@ def detect_ecb2(ciphertext):
 
     if stats:
       break
-  
+
   stats = [(b, c) for b, c in stats.items() if c > 1]
   return stats
 
@@ -638,22 +630,22 @@ class CTRCipher:
   def encrypt(self, msg):
     def pack(n):
       return bytes((n >> i) & 0xFF for i in range(0, 64, 8))
-    
+
     block_count = 0
     result = b''
 
     for block in chunk(msg, len(self.key)):
-    
+
       counter = pack(self.nonce) + pack(block_count)
       keystream = encrypt_ecb(counter, self.key)
       block_count += 1
-    
+
       result += xor(block, keystream)
 
     return result
 
   def decrypt(self, msg):
-    return self.encrypt(msg) 
+    return self.encrypt(msg)
 
   def edit(self, ciphertext, offset, newtext):
     '''seek into the ciphertext and re-encrypt with different plaintext (faster than edit2)'''
@@ -681,10 +673,9 @@ class MT19937:
     self.index = MT19937.n + 1
     self.MT = [0] * MT19937.n
 
-    lower_mask = (1 << MT19937.r) - 1
-    upper_mask = (1 << MT19937.r)
-
-    wbit_mask = (1 << MT19937.w) - 1  # lowest w bits mask
+    #lower_mask = (1 << MT19937.r) - 1
+    #upper_mask = (1 << MT19937.r)
+    #wbit_mask = (1 << MT19937.w) - 1  # lowest w bits mask
 
     if seed is not None:
       self.seed_mt(seed)
@@ -805,7 +796,9 @@ class SHA1:
     self._h0, self._h1, self._h2, self._h3, self._h4 = 0x67452301, 0xefcdab89, 0x98badcfe, 0x10325476, 0xc3d2e1f0
 
   def transform(self, chunk):
-    lrot = lambda x, n: (x << n) | (x >> (32 - n))
+    def lrot(x, n):
+      return (x << n) | (x >> (32 - n))
+
     w = []
 
     for j in range(len(chunk) // 32):
@@ -881,7 +874,7 @@ class SHA1:
     return ''.join('%08x' % i for i in (self._h0, self._h1, self._h2, self._h3, self._h4))
 
   def digest(self):
-    return hexdigest().decode('hex')
+    return unhex_str(self.digest())
 
 # }}}
 
@@ -918,7 +911,7 @@ def break_hmac():
   filename = '/etc/passwd'
   found = ''
 
-  rounds = 10 
+  rounds = 10
   while True:
     stats = Counter()
     for _ in range(rounds):
@@ -1008,7 +1001,7 @@ def mitm_dh_fakeg(p, g, fake_g):
   # M->A sends B.pubkey
   A.compute_sharedkey(B.pubkey)
 
-  if fake_g == p -1:
+  if fake_g == p - 1:
     if A.pubkey == p - 1 and B.pubkey == p - 1:
       M.sharedkey = derivekey(p - 1)
     else:
@@ -1190,7 +1183,7 @@ def egcd(b, n):
       q, b, n = b // n, n, b % n
       x0, x1 = x1, x0 - q * x1
       y0, y1 = y1, y0 - q * y1
-  return  b, x0, y0
+  return b, x0, y0
 
 def invmod(b, n):
   return inverse(b, n)
@@ -1270,6 +1263,10 @@ def rsa_unpadded_decryption_oracle(decryption_oracle, pubkey, ct):
   return int_to_bytes(pt)
 
 ASN1_SHA1 = '\x30\x21\x30\x09\x06\x05\x2b\x0e\x03\x02\x1a\x05\x00\x04\x14'
+
+def sha1(s):
+  '''return str for convenience'''
+  return B(hashlib.sha1(b(s)).digest())
 
 def rsa_bleichenbacher_e3_signature_forgery(msg):
   modlen = 1024 // 8 # attack for a 1024-bit modulus
@@ -1392,7 +1389,7 @@ class TestUtils(unittest.TestCase):
         self.assertTrue(unpadded == msg)
 
         pad = padded[-1]
-        new = padded[-pad:] + bytes([pad + 1]* pad)
+        new = padded[-pad:] + bytes([pad + 1] * pad)
         with self.assertRaises(PaddingException):
           pkcs7unpad(new)
 
@@ -1922,7 +1919,7 @@ class TestSRP(unittest.TestCase):
     # https://cryptopals.com/sets/5/challenges/36
 
     server, client = srp_normal()
-    self.assertTrue(server.check_mac(client.sign_salt()) == True)
+    self.assertTrue(server.check_mac(client.sign_salt()) is True)
 
   def test_srp_bypass(self):
     # client sends 0 as its pubkey (or N, N*2, etc.)
@@ -1932,7 +1929,7 @@ class TestSRP(unittest.TestCase):
 
     for fake_pubkey in [0, p, p*2]:
       server, client = srp_bypass(fake_pubkey)
-      self.assertTrue(server.check_mac(client.sign_salt()) == True)
+      self.assertTrue(server.check_mac(client.sign_salt()) is True)
 
       # both sides now have
       self.assertTrue(server.K == sha256('0'))
