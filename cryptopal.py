@@ -13,7 +13,7 @@ __author__  = 'Sebastien Macke'
 __email__   = 'lanjelot@gmail.com'
 __url__     = 'https://github.com/lanjelot/cryptopal'
 __twitter__ = 'https://twitter.com/lanjelot'
-__version__ = '0.0'
+__version__ = '0.1'
 __license__ = 'GPLv2'
 
 from collections import Counter, defaultdict
