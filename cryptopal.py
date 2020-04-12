@@ -887,7 +887,7 @@ class SHA1:
 
 # HMAC {{{
 def hmac_sha1(key, msg):
-  '''https://cryptopals.com/sets/4/challenges/31'''
+  # https://cryptopals.com/sets/4/challenges/31
   if len(key) > 64:
     key = hashlib.sha1(key).digest()
   if len(key) < 64:
@@ -914,7 +914,7 @@ def hmac_oracle(msg, sig):
 
 # attack takes too long to be in unit tests
 def break_hmac():
-  '''https://cryptopals.com/sets/4/challenges/32'''
+  # https://cryptopals.com/sets/4/challenges/32
   filename = '/etc/passwd'
   found = ''
 
@@ -1378,9 +1378,10 @@ def recover_dsa_repeated_k(q, msg1, sig1, msg2, sig2):
 
 # Unit Tests {{{
 import unittest
-class Tests(unittest.TestCase):
 
-  # Utils {{{
+# Utils {{{
+class TestUtils(unittest.TestCase):
+
   def test_pkcs7unpad(self):
     for bs in range(100):
       for msg_size in range(bs * 3):
@@ -1395,9 +1396,11 @@ class Tests(unittest.TestCase):
         with self.assertRaises(PaddingException):
           pkcs7unpad(new)
 
-  # }}}
+# }}}
 
-  # XOR {{{
+# XOR {{{
+class TestXOR(unittest.TestCase):
+
   def test_find_xor_keysize(self):
     for keysize in range(1, 40):
       key = random_bytes(keysize)
@@ -1429,9 +1432,11 @@ class Tests(unittest.TestCase):
       else:
         self.fail()
 
-  # }}}
+# }}}
 
-  # ECB {{{
+# ECB {{{
+class TestECB(unittest.TestCase):
+
   def test_find_blocksize(self):
 
     def encryption_oracle(s):
@@ -1451,7 +1456,7 @@ class Tests(unittest.TestCase):
           self.assertTrue(AES.block_size == find_blocksize(encryption_oracle))
 
   def test_detect_ecb(self):
-    '''https://cryptopals.com/sets/2/challenges/11'''
+    # https://cryptopals.com/sets/2/challenges/11
 
     def encryption_oracle(s, pfx_size, sfx_size):
       key = random_bytes(16)
@@ -1494,7 +1499,7 @@ class Tests(unittest.TestCase):
         self.assertTrue((pfx_size, sfx_size) == (len(pfx), len(sfx)))
 
   def test_decrypt_suffix(self):
-    '''https://cryptopals.com/sets/2/challenges/14'''
+    # https://cryptopals.com/sets/2/challenges/14
 
     def encryption_oracle(s):
       data = pfx + s + sfx
@@ -1510,10 +1515,12 @@ class Tests(unittest.TestCase):
 
         self.assertTrue(decrypted == sfx)
 
-  # }}}
+# }}}
 
-  # CBC {{{
+# CBC {{{
+class TestCBC(unittest.TestCase):
   # TODO add tests with other algorithms (e.g. DES)
+
   def test_cbc_encrypt_decrypt(self):
     for key_size in AES.key_size:
       for msg_size in range(AES.block_size * 3):
@@ -1527,8 +1534,8 @@ class Tests(unittest.TestCase):
         self.assertTrue(dec == msg)
 
   def test_cbc_ivkey_recover(self):
-    '''Recover the key from CBC with IV=Key '''
-    '''https://cryptopals.com/sets/4/challenges/27'''
+    # Recover the key from CBC with IV=Key
+    # https://cryptopals.com/sets/4/challenges/27
 
     for msg_size in range(100):
 
@@ -1554,9 +1561,11 @@ class Tests(unittest.TestCase):
 
       self.assertTrue(key == recovered)
 
-  # }}}
+# }}}
 
-  # Padding Oracle {{{
+# Padding Oracle {{{
+class TestPadding(unittest.TestCase):
+
   def test_padding_oracle_encrypt(self):
     key = b'YELLOW SUBMARINE'
 
@@ -1601,11 +1610,13 @@ class Tests(unittest.TestCase):
       pt = padbuster.decrypt(ct, AES.block_size)
       self.assertTrue(pkcs7unpad(pt) == msg)
 
-  # }}}
+# }}}
 
-  # CTR {{{
+# CTR {{{
+class TestCTR(unittest.TestCase):
+
   def test_ctr_encrypt_decrypt(self):
-    '''https://cryptopals.com/sets/3/challenges/18'''
+    # https://cryptopals.com/sets/3/challenges/18
 
     for key_size in AES.key_size:
       for msg_size in range(1, 100):
@@ -1636,8 +1647,8 @@ class Tests(unittest.TestCase):
       self.assertTrue(pt == new_msg)
 
   def test_ctr_break_fixed_nonce(self):
-    '''Break fixed-nonce CTR mode '''
-    '''https://cryptopals.com/sets/3/challenges/20'''
+    # Break fixed-nonce CTR mode
+    # https://cryptopals.com/sets/3/challenges/20
 
     lines = plaintext.split(b'\n')
 
@@ -1673,8 +1684,8 @@ class Tests(unittest.TestCase):
         self.fail()
 
   def test_ctr_break_edit(self):
-    '''Break "random access read/write" AES CTR '''
-    '''https://cryptopals.com/sets/4/challenges/25'''
+    # Break "random access read/write" AES CTR
+    # https://cryptopals.com/sets/4/challenges/25
 
     key = random_bytes(16)
     nonce = int(hexlify(random_bytes(8)), 16)
@@ -1685,11 +1696,13 @@ class Tests(unittest.TestCase):
     recovered = ctr.edit(ciphertext, 0, ciphertext)
     self.assertTrue(plaintext == recovered)
 
- # }}}
+# }}}
 
-  # MT19937 {{{
+# MT19937 {{{
+class TestMT(unittest.TestCase):
+
   def test_mt19937(self):
-    '''https://cryptopals.com/sets/3/challenges/21'''
+    # https://cryptopals.com/sets/3/challenges/21
 
     mt1, mt2 = MT19937(), MT19937()
 
@@ -1702,8 +1715,8 @@ class Tests(unittest.TestCase):
       self.assertTrue(mt1.extract_number() == mt2.extract_number())
 
   def test_mt19937_crack(self):
-    '''Crack an MT19937 seed '''
-    '''https://cryptopals.com/sets/3/challenges/22'''
+    # Crack an MT19937 seed
+    # https://cryptopals.com/sets/3/challenges/22
 
     seed1 = randint(40, 1000)
     first = MT19937(seed1).extract_number()
@@ -1715,8 +1728,8 @@ class Tests(unittest.TestCase):
     self.assertTrue(seed2 == seed1)
 
   def test_mt19937_clone(self):
-    '''Clone an MT19937 RNG from its output '''
-    '''https://cryptopals.com/sets/3/challenges/23'''
+    # Clone an MT19937 RNG from its output
+    # https://cryptopals.com/sets/3/challenges/23
 
     for _ in range(100):
       mt = MT19937(randint(0, 10**9))
@@ -1745,8 +1758,8 @@ class Tests(unittest.TestCase):
       self.assertTrue(pt == msg)
 
   def test_mt19937_break(self):
-    '''Break an MT19937 stream cipher '''
-    '''https://cryptopals.com/sets/3/challenges/24'''
+    # Break an MT19937 stream cipher
+    # https://cryptopals.com/sets/3/challenges/24
 
     # break PRNG stream cipher (recover key (16-bit seed)
     key = randint(0, 0xffff)
@@ -1784,11 +1797,13 @@ class Tests(unittest.TestCase):
 
     self.assertTrue(best_seed == secret_seed)
 
-  # }}}
+# }}}
 
-  # Hash Length Extension {{{
+# Hash Length Extension {{{
+class TestHLE(unittest.TestCase):
+
   def test_sha1_hash(self):
-    '''https://cryptopals.com/sets/4/challenges/28'''
+    # https://cryptopals.com/sets/4/challenges/28
 
     for size in range(1000):
       data = random_bytes(size)
@@ -1799,7 +1814,7 @@ class Tests(unittest.TestCase):
       self.assertTrue(sha.hexdigest() == hashlib.sha1(data).hexdigest())
 
   def test_sha1_extend(self):
-    '''https://cryptopals.com/sets/4/challenges/29'''
+    # https://cryptopals.com/sets/4/challenges/29
 
     def make_mac(msg):
       return hashlib.sha1(key + msg).hexdigest()
@@ -1824,11 +1839,13 @@ class Tests(unittest.TestCase):
 
           self.assertTrue(check_mac(forged_msg, forged_mac))
 
-  # }}}
+# }}}
 
-  # Diffie-Hellman {{{
+# Diffie-Hellman {{{
+class TestDH(unittest.TestCase):
+
   def test_dh(self):
-    '''https://cryptopals.com/sets/5/challenges/33'''
+    # https://cryptopals.com/sets/5/challenges/33
     p, g = params_dh()
 
     A = DH_Peer(p, g)
@@ -1849,8 +1866,8 @@ class Tests(unittest.TestCase):
     self.assertTrue(B.decrypt(ct1) == pt1)
 
   def test_dh_mitm_p(self):
-    '''mitm via sending p as A.pubkey and B.pubkey '''
-    '''https://cryptopals.com/sets/5/challenges/34'''
+    # mitm via sending p as A.pubkey and B.pubkey
+    # https://cryptopals.com/sets/5/challenges/34
     p, g = params_dh()
 
     A, B, M = mitm_dh_p(p, g)
@@ -1860,8 +1877,8 @@ class Tests(unittest.TestCase):
     self.assertTrue(is_mitm(A, B, M))
 
   def test_dh_mitm_fakeg(self):
-    '''mitm via malicious g '''
-    '''https://cryptopals.com/sets/5/challenges/35'''
+    # mitm via malicious g
+    # https://cryptopals.com/sets/5/challenges/35
     p, g = params_dh()
 
     # g = p
@@ -1896,18 +1913,20 @@ class Tests(unittest.TestCase):
     self.assertTrue((A.sharedkey == derivekey(p - 1) and B.sharedkey == derivekey(p - 1)) or (A.sharedkey == derivekey(1) and B.sharedkey == derivekey(1)))
     self.assertTrue(is_mitm(A, B, M))
 
-  # }}}
+# }}}
 
-  # SRP {{{
+# SRP {{{
+class TestSRP(unittest.TestCase):
+
   def test_srp_normal(self):
-    '''https://cryptopals.com/sets/5/challenges/36'''
+    # https://cryptopals.com/sets/5/challenges/36
 
     server, client = srp_normal()
     self.assertTrue(server.check_mac(client.sign_salt()) == True)
 
   def test_srp_bypass(self):
-    '''client sends 0 as its pubkey (or N, N*2, etc.) '''
-    '''https://cryptopals.com/sets/5/challenges/37'''
+    # client sends 0 as its pubkey (or N, N*2, etc.)
+    # https://cryptopals.com/sets/5/challenges/37
 
     p, _ = params_dh()
 
@@ -1920,8 +1939,8 @@ class Tests(unittest.TestCase):
       self.assertTrue(client.K == sha256('0'))
 
   def test_srp_mitm(self):
-    '''mitm can crack client's password offline '''
-    '''https://cryptopals.com/sets/5/challenges/38'''
+    # mitm can crack client's password offline
+    # https://cryptopals.com/sets/5/challenges/38
 
     server, client = srp_mitm()
     mac = client.sign_salt()
@@ -1929,9 +1948,11 @@ class Tests(unittest.TestCase):
 
     self.assertTrue(found == client.password)
 
-  # }}}
+# }}}
 
-  # RSA {{{
+# RSA {{{
+class TestRSA(unittest.TestCase):
+
   def test_rsa_encryptdecrypt(self):
     for key_size in [1024, 2048]: # bigger key sizes take forever
       for msg_size in range(1, 50):
@@ -1943,8 +1964,8 @@ class Tests(unittest.TestCase):
         self.assertTrue(decrypt_rsa(privkey, ct) == pt)
 
   def test_rsa_broadcast(self):
-    '''standard E=3 RSA broadcast attack with plaintext smaller than any modulus '''
-    '''https://cryptopals.com/sets/5/challenges/40'''
+    # standard E=3 RSA broadcast attack with plaintext smaller than any modulus
+    # https://cryptopals.com/sets/5/challenges/40
 
     exponent = 3
     msg = 'this is a secret message'
@@ -1960,9 +1981,9 @@ class Tests(unittest.TestCase):
     self.assertTrue(rec == msg)
 
   def test_rsa_broadcast_icectf(self):
-    '''Special case where a standard broadcast attack will not work because plaintext is bigger than any of the provided modulus. '''
-    '''Every individual RSA encryption loses some information, but when enough pubkeys and ciphertexts are gathered, the plaintext can be "magically" recovered. '''
-    '''http://blog.atx.name/icectf/#Agents'''
+    # Special case where a standard broadcast attack will not work because plaintext is bigger than any of the provided modulus.
+    # Every individual RSA encryption loses some information, but when enough pubkeys and ciphertexts are gathered, the plaintext can be "magically" recovered.
+    # http://blog.atx.name/icectf/#Agents
 
     exponent = 3
     ns = []
@@ -1986,8 +2007,9 @@ class Tests(unittest.TestCase):
     self.assertTrue(rec == msg)
 
   def test_rsa_unpadded_message_attack(self):
-    '''small message and small exponent '''
-    '''http://blog.atx.name/icectf/#RSA3'''
+    # small message and small exponent
+    # http://blog.atx.name/icectf/#RSA3
+
     exponent = 3
     msg = 'this is the secret message'
 
@@ -2002,7 +2024,7 @@ class Tests(unittest.TestCase):
     self.assertTrue(rec == msg)
 
   def test_rsa_unpadded_decryption_oracle(self):
-    '''https://cryptopals.com/sets/6/challenges/41'''
+    # https://cryptopals.com/sets/6/challenges/41
 
     ciphers = []
     def decrypt_once(ct):
@@ -2029,8 +2051,8 @@ class Tests(unittest.TestCase):
     self.assertTrue(rec == msg)
 
   def test_rsa_bleichenbacher_e3_signature_forgery(self):
-    '''https://cryptopals.com/sets/6/challenges/42 '''
-    '''OpenSSL and NSS used to be vulnerable, this attack broke Firefox's TLS certificate validation several years ago'''
+    # https://cryptopals.com/sets/6/challenges/42
+    # OpenSSL and NSS used to be vulnerable, this attack broke Firefox's TLS certificate validation several years ago
 
     def pkcs1_sign(msg):
       h = sha1(msg)
@@ -2060,7 +2082,7 @@ class Tests(unittest.TestCase):
       self.assertTrue(pkcs1_verify_bad(msg, sig_forged))
 
   def test_rsa_bleichenbacher_e3_signature_forgery_easy(self):
-   '''python-rsa CVE-2016-1494'''
+   # python-rsa CVE-2016-1494
 
    def pkcs1_verify_bad(msg, sig):
      cube = int_to_bytes(bytes_to_int(sig) ** 3)
@@ -2085,9 +2107,11 @@ class Tests(unittest.TestCase):
 
    self.assertTrue(pkcs1_verify_bad(msg, sig))
 
-  # }}}
+# }}}
 
-  # DSA {{{
+# DSA {{{
+class TestDSA(unittest.TestCase):
+
   def test_dsa_sign_verify(self):
     for msg_size in range(1, 50):
       privkey, pubkey = keygen_dsa()
@@ -2098,7 +2122,7 @@ class Tests(unittest.TestCase):
       self.assertTrue(verify_dsa(msg, sig, pubkey))
 
   def test_dsa_recover_key_brute(self):
-    '''https://cryptopals.com/sets/6/challenges/43'''
+    # https://cryptopals.com/sets/6/challenges/43
 
     msg = '''For those that envy a MC it can be hazardous to your health
 So be friendly, a matter of life and death, just like a etch-a-sketch
@@ -2122,7 +2146,7 @@ So be friendly, a matter of life and death, just like a etch-a-sketch
       self.fail()
 
   def test_dsa_recovery_repeated_nonce(self):
-    '''https://cryptopals.com/sets/6/challenges/44'''
+    # https://cryptopals.com/sets/6/challenges/44
     p, q, g = params_dsa()
 
     y = 0x2d026f4bf30195ede3a088da85e398ef869611d0f68f0713d51c9c1a3a26c95105d915e2d8cdf26d056b86b8a7b85519b1c23cc3ecdc6062650462e3063bd179c2a6581519f674a61f1d89a1fff27171ebc1b93d4dc57bceb7ae2430f98a6a4d83d8279ee65d71c1203d2c96d65ebbf7cce9d32971c3de5084cce04a2e147821
@@ -2178,7 +2202,8 @@ So be friendly, a matter of life and death, just like a etch-a-sketch
       self.fail()
 
   def test_dsa_bad_params(self):
-    '''https://cryptopals.com/sets/6/challenges/45'''
+    # https://cryptopals.com/sets/6/challenges/45
+
     msg1 = random_alnum(32)
     msg2 = random_alnum(32)
 
