@@ -78,6 +78,25 @@ def b64d(s):
 
   return b64decode(s)
 
+def stats(s):
+  print(' '.join('%3c' % k for k, _ in Counter(s).most_common()))
+  print(' '.join('%3d' % c for _, c in Counter(s).most_common()))
+  print()
+
+  ckeys = sorted(Counter(s).keys())
+
+  table = bytes(n for n in range(0x30, 0x7f))
+  found = []
+
+  for n in table:
+    if n in ckeys:
+      found.append(n)
+    else:
+      found.append(0x20)
+
+  print(table)
+  print(bytes(found))
+
 def base36encode(number):
   if not isinstance(number, int):
     raise TypeError('number must be an integer')
@@ -120,7 +139,7 @@ def chunk(s, bs):
   return [s[i:i + bs] for i in range(0, len(s), bs)]
 
 def chunk_pp(s, bs):
-  return [hex_str(ss) for ss in chunk(s, bs)]
+  return [hexlify(ss) for ss in chunk(s, bs)]
 
 def ichunk(s, bs):
   for i in range(0, len(s), bs):
@@ -128,12 +147,9 @@ def ichunk(s, bs):
 
 def bytes_to_int(s):
   return int.from_bytes(b(s), 'big')
-  #return int(hexlify(b(s)), 16)
 
 def int_to_bytes(n):
-  s = '%x' % n
-  s = s if len(s) % 2 == 0 else '0' + s
-  return unhex_str(s)
+  return B(int(n).to_bytes((n.bit_length() + 7) // 8, 'big'))
 
 def sha256(s):
   return hashlib.sha256(b(s)).digest()
@@ -164,6 +180,8 @@ def pairwise(iterable):
   a, b = itertools.tee(iterable)
   next(b, None)
   return zip(a, b)
+
+FLAG_FREQ = b'_ETAONRISHDLFCMUGYPWBVKJXQZ0123456789etaonrishdlfcmugypwbvkjxqz{}!?@#%&$-^"\'()*+,./:;<=>[\\]^`|~ '
 
 def score_english(msg, english="etaonrishd .,\nlfcmugypwbvkjxqz-_!?'\"/1234567890*"):
   msg = B(msg)
@@ -424,41 +442,46 @@ def sizeof_pfxsfx(encryption_oracle, bs):
 
   return prefix_size, suffix_size, c
 
-def decrypt_suffix(encryption_oracle, bs=None, prefix_size=None, suffix_size=None, char=None, verbose=False, charset=None):
+def decrypt_suffix(encryption_oracle, bs=None, prefix_size=None, suffix_size=None, char=None, charset=None, recovered=b''):
   if bs is None:
     bs = find_blocksize(encryption_oracle)
 
-  if verbose:
-    print('[+] blocksize: %d' % bs)
+  logging.info(f'blocksize: {bs}')
 
   if prefix_size is None or suffix_size is None or char is None:
     prefix_size, suffix_size, char = sizeof_pfxsfx(encryption_oracle, bs)
 
+  logging.info(f'prefix_size: {prefix_size}, suffix_size: {suffix_size}, char: {char}')
+
   if charset is None:
     charset = [bchr(c) for c in range(256)]
 
-  if verbose:
-    print('[+] prefix_size: %d, suffix_size: %d, char: %s' % (prefix_size, suffix_size, char))
-
   ref_index = (prefix_size + suffix_size) // bs
-  decrypted = b''
 
-  for n in reversed(range(suffix_size + (bs - ((prefix_size + suffix_size) % bs)))):
+  j = suffix_size + (bs - ((prefix_size + suffix_size) % bs))
+  i = j - suffix_size
+
+  j -= len(recovered)
+  logging.debug(f'i: {i}, j: {j}')
+
+  for n in reversed(range(i, j)):
+    logging.debug(f'n: {n}')
     data = char * n
+
     ref_block = chunk(encryption_oracle(data), bs)[ref_index]
+    logging.debug(f'ref_block: {ref_block}')
 
     for c in charset:
-      msg = data + decrypted + c
+      msg = data + recovered + c
 
       if ref_block == chunk(encryption_oracle(msg), bs)[ref_index]:
-        decrypted += c
-        if verbose:
-          print('decrypted: %r' % decrypted)
+        recovered += c
+        logging.info('recovered: %r' % recovered)
         break
     else:
-      decrypted += b'?'
+      recovered += b'?'
 
-  return decrypted[:suffix_size]
+  return recovered[:suffix_size]
 
 # }}}
 
@@ -872,9 +895,6 @@ class SHA1:
 
   def hexdigest(self):
     return ''.join('%08x' % i for i in (self._h0, self._h1, self._h2, self._h3, self._h4))
-
-  def digest(self):
-    return unhex_str(self.digest())
 
 # }}}
 
@@ -1483,13 +1503,13 @@ class TestECB(unittest.TestCase):
 
     def encryption_oracle(s):
       data = pfx + s + sfx
-      return encrypt_ecb(pkcs7pad(data, AES.block_size), key)
+      return encrypt_ecb(pkcs7pad(data, AES.block_size), b'YELLOW SUBMARINE')
 
-    for key_size in AES.key_size:
-      for max_size in range(0, AES.block_size * 3):
-        key = random_bytes(key_size)
-        pfx = random_bytes(randint(0, max_size))
-        sfx = random_bytes(randint(0, max_size))
+    for pfx_size in range(AES.block_size * 2):
+      for sfx_size in range(AES.block_size * 2):
+
+        pfx = random_bytes(pfx_size)
+        sfx = random_bytes(sfx_size)
 
         pfx_size, sfx_size, _ = sizeof_pfxsfx(encryption_oracle, AES.block_size)
 
@@ -1500,15 +1520,15 @@ class TestECB(unittest.TestCase):
 
     def encryption_oracle(s):
       data = pfx + s + sfx
-      return encrypt_ecb(pkcs7pad(data, AES.block_size), key)
+      return encrypt_ecb(pkcs7pad(data, AES.block_size), b'YELLOW SUBMARINE')
 
-    for key_size in AES.key_size:
-      for max_size in range(0, AES.block_size * 3):
-        key = random_bytes(key_size)
-        pfx = random_bytes(randint(0, max_size))
-        sfx = random_bytes(randint(0, max_size))
+    for pfx_size in range(AES.block_size * 2):
+      for sfx_size in range(AES.block_size * 2):
 
-        decrypted = decrypt_suffix(encryption_oracle)
+        pfx = random_bytes(pfx_size)
+        sfx = random_bytes(sfx_size)
+
+        decrypted = decrypt_suffix(encryption_oracle, bs=AES.block_size, prefix_size=pfx_size, suffix_size=sfx_size, char=b'C')
 
         self.assertTrue(decrypted == sfx)
 
@@ -2234,7 +2254,7 @@ So be friendly, a matter of life and death, just like a etch-a-sketch
 if __name__ == '__main__':
   plaintext = b'''In 2071, roughly sixty years after an accident with a hyperspace gateway made the Earth uninhabitable, humanity has colonized most of the rocky planets and moons of the Solar System.\n Amid a rising crime rate, the Inter Solar System Police (ISSP) set up a legalized contract system, in which registered bounty hunters (also referred to as "Cowboys") chase criminals and bring them in alive in return for a reward.\n The series protagonists are bounty hunters working from the spaceship Bebop.\n The original crew are Spike Spiegel, an exiled former hitman of the criminal Red Dragon Syndicate, and his partner Jet Black, a former ISSP officer.\n They are later joined by Faye Valentine, an amnesiac con artist; Edward Wong, an eccentric girl skilled in hacking; and Ein, a genetically-engineered Pembroke Welsh Corgi with human-like intelligence.\n Over the course of the series, the team get involved in disastrous mishaps leaving them out of pocket, while often confronting faces and events from their past: these include Jet's reasons for leaving the ISSP, and Faye's past as a young woman from Earth injured in an accident and cryogenically frozen to save her life'''
 
-  #logging.basicConfig(level=logging.DEBUG)
+  #logging.basicConfig(format='%(name)s %(levelname)7s - %(message)s', level=logging.DEBUG)
   unittest.main()
 
 # vim: ts=2 sw=2 sts=2 et fdm=marker bg=dark

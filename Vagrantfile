@@ -14,7 +14,7 @@ $cryptopal = <<SCRIPT
 python3 -m venv cryptopalenv --without-pip
 source cryptopalenv/bin/activate
 wget --quiet -O - https://bootstrap.pypa.io/get-pip.py | python3
-pip install requests pycryptodomex PyCrypto gmpy2
+python3 -m pip install requests pycryptodomex PyCrypto gmpy2
 python3 /vagrant/cryptopal.py -v
 
 SCRIPT

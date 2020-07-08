@@ -1,5 +1,4 @@
-from http.server import SimpleHTTPRequestHandler
-from http.server import HTTPServer
+from http.server import SimpleHTTPRequestHandler, HTTPServer
 from cryptopal import hmac_sha1, insecure_compare, b
 from urllib.parse import urlparse, parse_qs
 from binascii import unhexlify
