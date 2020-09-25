@@ -129,8 +129,12 @@ def random_str(n, charset=None):
 def random_alnum(n):
   return random_str(n, 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789 ')
 
+def xor_hex(h1, h2):
+  return hexlify(xor(unhexlify(h1), unhexlify(h2)))
+
 def xor(text, key):
   if isinstance(text, str) and isinstance(key, str):
+    #from Crypto.Util.strxor import strxor
     return ''.join([chr(ord(c1) ^ ord(c2)) for c1, c2 in zip(text, itertools.cycle(key))])
   else:
     return bytes(c1 ^ c2 for c1, c2 in zip(text, itertools.cycle(key)))
@@ -154,6 +158,7 @@ def int_to_bytes(n):
 def sha256(s):
   return hashlib.sha256(b(s)).digest()
 
+# from Cryptodome.Util.Padding import pad, unpad
 def pkcs7pad(s, bs):
   pad = bs - (len(s) % bs)
   return s + bytes([pad] * pad)
@@ -207,7 +212,7 @@ def byteflip(ciphertext, oracle):
   '''Flip only one bit in a byte'''
 
   for i in range(len(ciphertext)):
-    payload = ciphertext[:i] + chr((ord(ciphertext[i]) + 1) % 256) + ciphertext[i + 1:]
+    payload = ciphertext[:i] + bytes([(ciphertext[i] + 1) % 256]) + ciphertext[i + 1:]
     yield i, oracle(payload)
 
 def bitflip(ciphertext, oracle):
@@ -215,7 +220,7 @@ def bitflip(ciphertext, oracle):
 
   for i in range(len(ciphertext)):
     for n in range(7, 0, -1):
-      payload = ciphertext[:i] + chr(ord(ciphertext[i]) ^ (1 << n)) + ciphertext[i + 1:]
+      payload = ciphertext[:i] + bytes([ciphertext[i] ^ (1 << n)]) + ciphertext[i + 1:]
       yield i, oracle(payload)
 
 def bitflipall(ciphertext, oracle):
@@ -228,7 +233,7 @@ def bitflipall(ciphertext, oracle):
   '''
   for i in range(len(ciphertext)):
     for n in range(256):
-      payload = ciphertext[:i] + chr(n) + ciphertext[i + 1:]
+      payload = ciphertext[:i] + bytes([n]) + ciphertext[i + 1:]
       yield i, oracle(payload)
 
 # http://eddmann.com/posts/implementing-rot13-and-rot-n-caesar-ciphers-in-python/
@@ -483,15 +488,15 @@ def decrypt_suffix(encryption_oracle, bs=None, prefix_size=None, suffix_size=Non
 
   return recovered[:suffix_size]
 
-# }}}
-
-# CBC {{{
 def encrypt_ecb(msg, key):
   return AES.new(key, mode=AES.MODE_ECB).encrypt(msg)
 
 def decrypt_ecb(msg, key):
   return AES.new(key, mode=AES.MODE_ECB).decrypt(msg)
 
+# }}}
+
+# CBC {{{
 def encrypt_cbc(msg, key, iv):
   ct = iv
   result = b''
