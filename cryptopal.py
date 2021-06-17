@@ -19,7 +19,7 @@ __license__ = 'GPLv2'
 from collections import Counter, defaultdict
 from Cryptodome.Cipher import AES
 from Cryptodome.Util.number import getPrime as get_prime
-from Crypto.PublicKey.RSA import inverse
+#from Crypto.PublicKey.RSA import inverse
 from random import randint, shuffle, randrange
 import itertools
 import hashlib
@@ -36,9 +36,9 @@ from requests.packages.urllib3.exceptions import InsecureRequestWarning
 requests.packages.urllib3.disable_warnings(InsecureRequestWarning)
 from operator import mul
 from functools import reduce
-from base64 import b64decode, b64encode
+from base64 import b64decode, b64encode, urlsafe_b64decode, urlsafe_b64encode
 from binascii import hexlify, unhexlify
-from gmpy2 import iroot
+#from gmpy2 import iroot
 
 # Utils {{{
 def b(s):
@@ -76,7 +76,13 @@ def b64d(s):
   if l != 0:
     s += '=' * (4 - l)
 
-  return b64decode(s)
+  return B(b64decode(s))
+
+def b64urldecode(b64):
+    return urlsafe_b64decode(b64+("="*(len(b64) % 4)))
+
+def b64urlencode(m):
+    return urlsafe_b64encode(m).strip(b"=")
 
 def stats(s):
   print(' '.join('%3c' % k for k, _ in Counter(s).most_common()))
@@ -145,6 +151,9 @@ def chunk(s, bs):
 def chunk_pp(s, bs):
   return [hexlify(ss) for ss in chunk(s, bs)]
 
+def chunk_len(s, bs=16):
+  return '\n' + '\n'.join(['%s %d' % (ss.hex(), len(ss)) for ss in chunk(s, bs)])
+
 def ichunk(s, bs):
   for i in range(0, len(s), bs):
     yield s[i:i + bs]
@@ -187,6 +196,8 @@ def pairwise(iterable):
   return zip(a, b)
 
 FLAG_FREQ = b'_ETAONRISHDLFCMUGYPWBVKJXQZ0123456789etaonrishdlfcmugypwbvkjxqz{}!?@#%&$-^"\'()*+,./:;<=>[\\]^`|~ '
+FLAG_FREQ = b'_etaonrishdlfcmugypwbvkjxqz0123456789{}!?@#%&$-^"\'()*+,./:;<=>[\\]^`|~ '
+FLAG_FREQ = b'_etaonrishdlfcmugypwbvkjxqz{}ETAONRISHDLFCMUGYPWBVKJXQZ0123456789!?@#%&$-^"\'()*+,./:;<=>[\\]^`|~ '
 
 def score_english(msg, english="etaonrishd .,\nlfcmugypwbvkjxqz-_!?'\"/1234567890*"):
   msg = B(msg)
